@@ -7,11 +7,11 @@ class RiddleSenseDataset:
     def __init__(self):
         original_dataset = load_dataset(self.DATASET_NAME)
 
-        self.dataset = {}
+        self.entries = {}
         for split in ['train', 'validation', 'test']:
-            self.dataset[split] = []
+            self.entries[split] = []
             for entry in original_dataset[split]:
-                self.dataset[split].append(DataEntry(entry))
+                self.entries[split].append(DataEntry(entry))
 
 
 class DataEntry:
