@@ -230,5 +230,19 @@ if __name__ == '__main__':
     # TODO. Pre-process dataset.
     dataset = RiddleSenseDataset()
 
-    g_acc = get_generation_log_accuracy(model, tokenizer, dataset)
+    print("Step 1: Generation exact match accuracy")
+    g_acc = get_generation_accuracy(model, tokenizer, dataset)
     print(g_acc)
+
+    print("\nStep 2: Discrimination exact match accuracy")
+    d_acc = get_discrimination_accuracy(model, tokenizer, dataset)
+    print(d_acc)
+
+    print("\nStep 3: Generation log accuracy")
+    g_log_acc = get_generation_log_accuracy(model, tokenizer, dataset)
+    print(g_log_acc)
+
+    print("\nStep 4: Discrimination log accuracy")
+    d_log_acc = get_discrimination_log_accuracy(model, tokenizer, dataset)
+    print(d_log_acc)
+
