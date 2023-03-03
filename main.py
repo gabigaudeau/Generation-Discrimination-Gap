@@ -5,7 +5,12 @@ import random
 
 from RiddleSenseDataset import RiddleSenseDataset
 
+
+# Fields.
 SEED = 42
+MODEL_NAME = 'EleutherAI/pythia-70m-deduped'
+REVISION = 'step3000'
+CACHE_DIR = './pythia-70m-deduped/step3000'
 DISCRIMINATION_PROMPT = "Q: [QUESTION]\nA: [ANSWER]\nIs this a correct answer to the riddle?\n[OUTPUT]"
 GENERATION_PROMPT = "Q: [QUESTION]\nThe answer to the riddle is: [ANSWER]"
 K = 5  # Sample size.
@@ -94,7 +99,6 @@ def get_generation_accuracy(model, tokenizer, dataset):
     return correct_outputs / (total_outputs * K)
 
 
-# TODO. Add averaging over k=5 samples.
 def get_generation_log_accuracy(model, tokenizer, dataset):
     sum_log_probabilities = 0
     total_outputs = 0
@@ -115,25 +119,25 @@ def get_generation_log_accuracy(model, tokenizer, dataset):
                 .replace('[QUESTION]', question) \
                 .replace('[ANSWER]', answer)
 
-            input_ids = tokenizer(prompt, padding=True, return_tensors="pt").input_ids
-            outputs = model(input_ids)
-            probs = torch.log_softmax(outputs.logits, dim=-1).detach()
+            input_ids = tokenizer(prompt, return_tensors="pt").input_ids
+            outputs = model.generate(input_ids, max_length=160, pad_token_id=tokenizer.eos_token_id,
+                                     return_dict_in_generate=True, output_scores=True,
+                                     num_return_sequences=K, do_sample=True)
 
-            # Collect the probability of the generated token:
-            # probability at index 0 corresponds to the token at index 1.
-            probs = probs[:, :-1, :]
-            input_ids = input_ids[:, 1:]
-            gen_probs = torch.gather(probs, 2, input_ids[:, :, None]).squeeze(-1)
+            gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
+            probs = torch.stack(outputs.scores, dim=1).softmax(-1)
+            gen_probs = torch.gather(probs, 2, gen_sequences[:, :, None]).squeeze(-1)
 
             log_prob = 0
-            for token, p in zip(input_ids[0], gen_probs[0]):
-                if token not in tokenizer.all_special_ids:
-                    # Deal with multi-word/long tokens.
-                    # Assumption: sum the probabilities of the parts.
-                    # https://stackoverflow.com/questions/59435020/get-probability-of-multi-token-word-in-mask-position
-                    if tokenizer.decode(token) in answer:
-                        log_prob += p.item()
-            probabilities.append(log_prob)
+            for k in range(K):
+                for token, p in zip(input_ids[0], gen_probs[k]):
+                    if token not in tokenizer.all_special_ids:
+                        # Deal with multi-word/long tokens.
+                        # Assumption: sum the probabilities of the parts.
+                        # https://stackoverflow.com/questions/59435020/get-probability-of-multi-token-word-in-mask-position
+                        if tokenizer.decode(token) in answer:
+                            log_prob += p.item()
+            probabilities.append(log_prob/K)
             labels.append(label)
 
         # Convert to non-log probabilities.
@@ -171,24 +175,24 @@ def get_discrimination_log_accuracy(model, tokenizer, dataset):
                     .replace('[OUTPUT]', output)
 
                 input_ids = tokenizer(prompt, padding=True, return_tensors="pt").input_ids
-                outputs = model(input_ids)
-                probs = torch.log_softmax(outputs.logits, dim=-1).detach()
+                outputs = model.generate(input_ids, max_length=160, pad_token_id=tokenizer.eos_token_id,
+                                         return_dict_in_generate=True, output_scores=True,
+                                         num_return_sequences=K, do_sample=True)
 
-                # Collect the probability of the generated token:
-                # probability at index 0 corresponds to the token at index 1.
-                probs = probs[:, :-1, :]
-                input_ids = input_ids[:, 1:]
-                gen_probs = torch.gather(probs, 2, input_ids[:, :, None]).squeeze(-1)
+                gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
+                probs = torch.stack(outputs.scores, dim=1).softmax(-1)
+                gen_probs = torch.gather(probs, 2, gen_sequences[:, :, None]).squeeze(-1)
 
                 # Deal with multi-word/long tokens.
                 # Assumption: sum the probabilities of the parts.
                 # https://stackoverflow.com/questions/59435020/get-probability-of-multi-token-word-in-mask-position
                 log_prob = 0
-                for token, p in zip(input_ids[0], gen_probs[0]):
-                    if token not in tokenizer.all_special_ids:
-                        if tokenizer.decode(token) in output:
-                            log_prob += p.item()
-                probabilities.append(log_prob)
+                for k in range(K):
+                    for token, p in zip(input_ids[0], gen_probs[k]):
+                        if token not in tokenizer.all_special_ids:
+                            if tokenizer.decode(token) in output:
+                                log_prob += p.item()
+                probabilities.append(log_prob/K)
 
             # Convert to non-log probabilities.
             probabilities = np.exp(np.array(probabilities))
@@ -204,12 +208,8 @@ def get_discrimination_log_accuracy(model, tokenizer, dataset):
 
 
 if __name__ == '__main__':
-    # Settings
-    SEED = 42
+    # Setting the random seed.
     random.seed(SEED)
-    MODEL_NAME = 'EleutherAI/pythia-70m-deduped'
-    REVISION = 'step3000'
-    CACHE_DIR = './pythia-70m-deduped/step3000'
 
     tokenizer = AutoTokenizer.from_pretrained(
         MODEL_NAME,
@@ -230,5 +230,5 @@ if __name__ == '__main__':
     # TODO. Pre-process dataset.
     dataset = RiddleSenseDataset()
 
-    g_acc = get_generation_accuracy(model, tokenizer, dataset)
+    g_acc = get_generation_log_accuracy(model, tokenizer, dataset)
     print(g_acc)
