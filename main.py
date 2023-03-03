@@ -1,13 +1,14 @@
 from transformers import GPTNeoXForCausalLM, AutoTokenizer
-from datasets import load_dataset
 import torch
-from torch.nn import functional as F
 import numpy as np
+import random
 
 from RiddleSenseDataset import RiddleSenseDataset
 
+SEED = 42
 DISCRIMINATION_PROMPT = "Q: [QUESTION]\nA: [ANSWER]\nIs this a correct answer to the riddle?\n[OUTPUT]"
 GENERATION_PROMPT = "Q: [QUESTION]\nThe answer to the riddle is: [ANSWER]"
+K = 5  # Sample size.
 
 
 def get_first_new_token(output, prompt):
@@ -40,22 +41,26 @@ def get_discrimination_accuracy(model, tokenizer, dataset):
             answer = entry.choices[label]
 
             # exact match
-            prompt = DISCRIMINATION_PROMPT\
-                .replace('[QUESTION]', question)\
-                .replace('[ANSWER]', answer)\
+            prompt = DISCRIMINATION_PROMPT \
+                .replace('[QUESTION]', question) \
+                .replace('[ANSWER]', answer) \
                 .replace('[OUTPUT]', "")
 
             inputs = tokenizer(prompt, return_tensors="pt")
-            tokens = model.generate(**inputs, max_length=160, pad_token_id=tokenizer.eos_token_id)
+            tokens = model.generate(**inputs, max_length=160, pad_token_id=tokenizer.eos_token_id,
+                                    num_return_sequences=K, do_sample=True)
 
-            token = get_first_new_token(tokenizer.decode(tokens[0]), prompt)
-            if token is not None:
-                if 'yes' == token.lower() and label == entry.answer_key:
-                    correct_outputs += 1
-                elif 'no' == token.lower() and not label == entry.answer_key:
-                    correct_outputs += 1
+            for k in range(K):
+                token = get_first_new_token(tokenizer.decode(tokens[k]), prompt)
+                if token is not None:
+                    if 'yes' == token.lower():
+                        if label == entry.answer_key:
+                            correct_outputs += 1
+                    # Anything else than yes is considered to be a "no".
+                    elif not label == entry.answer_key:
+                        correct_outputs += 1
 
-    return correct_outputs / total_outputs
+    return correct_outputs / (total_outputs * K)
 
 
 def get_generation_accuracy(model, tokenizer, dataset):
@@ -71,19 +76,22 @@ def get_generation_accuracy(model, tokenizer, dataset):
         answer = entry.choices[entry.answer_key]
 
         # exact match
-        prompt = GENERATION_PROMPT\
-            .replace('[QUESTION]', question)\
+        prompt = GENERATION_PROMPT \
+            .replace('[QUESTION]', question) \
             .replace('[ANSWER]', "")
 
         inputs = tokenizer(prompt, return_tensors="pt")
-        tokens = model.generate(**inputs, max_length=160, pad_token_id=tokenizer.eos_token_id)
+        tokens = model.generate(**inputs, max_length=160, pad_token_id=tokenizer.eos_token_id,
+                                num_return_sequences=K, do_sample=True)
 
-        token = get_first_new_token(tokenizer.decode(tokens[0]), prompt)
-        if token is not None:
-            if answer == token.lower():
-                correct_outputs += 1
+        for k in range(K):
+            token = get_first_new_token(tokenizer.decode(tokens[k]), prompt)
+            if token is not None:
+                # For multi-word expressions, we consider that if the output contains part of the answer, it is correct.
+                if token.lower() in answer:
+                    correct_outputs += 1
 
-    return correct_outputs / total_outputs
+    return correct_outputs / (total_outputs * K)
 
 
 # TODO. Add averaging over k=5 samples.
@@ -117,27 +125,28 @@ def get_generation_log_accuracy(model, tokenizer, dataset):
             input_ids = input_ids[:, 1:]
             gen_probs = torch.gather(probs, 2, input_ids[:, :, None]).squeeze(-1)
 
+            log_prob = 0
             for token, p in zip(input_ids[0], gen_probs[0]):
                 if token not in tokenizer.all_special_ids:
-                    print(tokenizer.decode(token))
-                    if tokenizer.decode(token) == answer:
-                        probabilities.append(p.item())
-                        labels.append(label)
+                    # Deal with multi-word/long tokens.
+                    # Assumption: sum the probabilities of the parts.
+                    # https://stackoverflow.com/questions/59435020/get-probability-of-multi-token-word-in-mask-position
+                    if tokenizer.decode(token) in answer:
+                        log_prob += p.item()
+            probabilities.append(log_prob)
+            labels.append(label)
 
-        print(probabilities)
-        probabilities = np.array(probabilities)
+        # Convert to non-log probabilities.
+        probabilities = np.exp(np.array(probabilities))
         # Normalise the probabilities.
-        normalised_probabilities = np.exp(probabilities)
-
-        print(sum(normalised_probabilities))
-        print(sum(probabilities))
+        normalised_probabilities = [p / sum(probabilities) for p in probabilities]
 
         for i in range(len(labels)):
             if labels[i] == entry.answer_key:
                 sum_log_probabilities += normalised_probabilities[i]
                 break
 
-    return sum_log_probabilities/total_outputs
+    return sum_log_probabilities / total_outputs
 
 
 def get_discrimination_log_accuracy(model, tokenizer, dataset):
@@ -156,10 +165,10 @@ def get_discrimination_log_accuracy(model, tokenizer, dataset):
             probabilities = []
 
             for output in ["Yes", "No"]:
-                prompt = GENERATION_PROMPT \
+                prompt = DISCRIMINATION_PROMPT \
                     .replace('[QUESTION]', question) \
                     .replace('[ANSWER]', answer) \
-                    .replace('[OUTPUT]', "")
+                    .replace('[OUTPUT]', output)
 
                 input_ids = tokenizer(prompt, padding=True, return_tensors="pt").input_ids
                 outputs = model(input_ids)
@@ -171,24 +180,33 @@ def get_discrimination_log_accuracy(model, tokenizer, dataset):
                 input_ids = input_ids[:, 1:]
                 gen_probs = torch.gather(probs, 2, input_ids[:, :, None]).squeeze(-1)
 
+                # Deal with multi-word/long tokens.
+                # Assumption: sum the probabilities of the parts.
+                # https://stackoverflow.com/questions/59435020/get-probability-of-multi-token-word-in-mask-position
+                log_prob = 0
                 for token, p in zip(input_ids[0], gen_probs[0]):
                     if token not in tokenizer.all_special_ids:
-                        if tokenizer.decode(token) == output:
-                            probabilities.append(p.item())
+                        if tokenizer.decode(token) in output:
+                            log_prob += p.item()
+                probabilities.append(log_prob)
 
+            # Convert to non-log probabilities.
+            probabilities = np.exp(np.array(probabilities))
             # Normalise the probabilities.
-            normalised_probabilities = [p/sum(probabilities) for p in probabilities]
+            normalised_probabilities = [p / sum(probabilities) for p in probabilities]
 
             if label == entry.answer_key:
                 sum_log_probabilities += normalised_probabilities[0]
             else:
                 sum_log_probabilities += normalised_probabilities[1]
 
-    return sum_log_probabilities/total_outputs
+    return sum_log_probabilities / total_outputs
 
 
 if __name__ == '__main__':
     # Settings
+    SEED = 42
+    random.seed(SEED)
     MODEL_NAME = 'EleutherAI/pythia-70m-deduped'
     REVISION = 'step3000'
     CACHE_DIR = './pythia-70m-deduped/step3000'
@@ -201,138 +219,16 @@ if __name__ == '__main__':
 
     tokenizer.pad_token = tokenizer.eos_token
 
-    # tokenizer.add_tokens(['[SEP]'], special_tokens=True)
-
     # Vary model sizes:
     # 70M, 160M, 410M, 1B, 1.4B, 2.8B, 6.9B, and 12B.
     model = GPTNeoXForCausalLM.from_pretrained(
         MODEL_NAME,
         revision=REVISION,
-        cache_dir=CACHE_DIR,
+        cache_dir=CACHE_DIR
     )
 
+    # TODO. Pre-process dataset.
     dataset = RiddleSenseDataset()
 
-    g_acc = get_generation_log_accuracy(model, tokenizer, dataset)
+    g_acc = get_generation_accuracy(model, tokenizer, dataset)
     print(g_acc)
-
-    # TODO. Pre-process dataset?
-
-    # for question in dataset['validation'].keys():
-    #     for tuple in question:
-    #         input_ids = tokenizer(tuple[0], return_tensors="pt").input_ids
-    #         k = 5
-    #         generated_outputs = model.generate(input_ids, do_sample=True, top_p=0.95, num_return_sequences=k,
-    #                                            output_scores=True, max_new_tokens=50, max_length=160,
-    #                                            pad_token_id=tokenizer.eos_token_id, output_hidden_states=True,
-    #                                             output_attentions=True)
-    #
-    #         # scores for first token, for all k
-    #         gen_sequences = generated_outputs.sequences[:, input_ids.shape[-1]:]
-    #         probs = torch.stack(generated_outputs.scores, dim=1).softmax(-1)
-    #
-    #         # 1) the probs that exactly those sequences are generated again
-    #         # those are normally going to be very small
-    #         gen_probs = torch.gather(probs, 2, gen_sequences[:, :, None]).squeeze(-1)
-    #
-    #         # 2) normalize the probs over the three sequences
-    #         normed_gen_probs = gen_probs / gen_probs.sum(0)
-    #         assert normed_gen_probs[:, 0].sum() == 1.0, "probs should be normalized"
-    #
-    #         # 3) compare normalized probs to each other like in 1)
-    #         unique_normed_prob_per_sequence = normed_gen_probs.prod(-1)
-    #
-    #         # for question in dataset['validation'].keys():
-    # #     for tuple in question:
-    # #         input_ids = tokenizer(tuple[0], return_tensors="pt").input_ids
-    # #         output = model.generate(input_ids, max_length=160, pad_token_id=tokenizer.eos_token_id,
-    # #                                 return_dict_in_generate=True, output_scores=True)
-    # #         tokens = output["sequences"][:, input_ids.shape[-1]:]
-    # #         sequences = tokenizer.decode(tokens[0], skip_special_tokens=True)
-    # #         probs = torch.stack(output["scores"], dim=1).softmax(-1)
-    # #         gen_probs = torch.gather(probs, 2, tokens[:, :, None]).squeeze(-1)
-    # #
-    # #
-    # #         print(gen_probs)
-    #
-    # # if dataset['validation'][question] in output.lower():
-    # #     correct_outputs += 1
-    #
-    # return None
-
-    # Format:
-    # 'answerKey': 'E',
-    # 'question': 'A man is incarcerated in prison, and as his punishment he has to carry a one tonne bag of sand
-    # backwards and forwards across a field the size of a football pitch.  What is the one thing he can put in it to
-    # make it lighter?',
-    # 'choices':
-    #           'label': ['A', 'B', 'C', 'D', 'E'],
-    #           'text': ['throw', 'bit', 'gallon', 'mouse', 'hole']
-
-    # Discrimination
-    # dataset = prepare_riddle_dataset_for_discrimination()
-    # d_acc = get_discrimination_accuracy(model, tokenizer, dataset)
-    # print(d_acc)
-
-    # Generation
-    # dataset = prepare_riddle_dataset_for_generation()
-    # g_acc = get_generation_accuracy(model, tokenizer, dataset)
-    # print(g_acc)
-
-    # dataset = prepare_riddle_dataset_for_log_discrimination()
-    #
-    # sentence = "Q: Something very helpful if you want to go gently down a stream.\nA: [MASK]\n" \
-    #            "Is this a correct answer to the riddle?"
-    # targets = ["raft", "roll down hill", "rowboat", "water", "roll over"]
-    # target_log_P = {t: None for t in targets}
-    # for target in target_log_P:
-    #     input = tokenizer(sentence.replace("[MASK]", target), return_tensors="pt", )
-    #     output = model(**input)
-    #
-    #     target_log_P[target] = sum([
-    #         torch.log(F.softmax(output.logits[0][i], dim=-1)[idx])
-    #         for i, idx in enumerate(input.input_ids[0])
-    #     ]).item()
-    #
-    # print(target_log_P)
-    #
-    # print()
-    # print("-------------------------")
-    #
-    # sentence = "Q: Something very helpful if you want to go gently down a stream.\nA: raft\n" \
-    #            "Is this a correct answer to the riddle?"
-    #
-    # # batch = to_tokens_and_logprobs(model, tokenizer, sentence)
-    # print(batch)
-    #
-
-    # sentence = "Q: Something very helpful if you want to go gently down a stream.\nA: [MASK]\n" \
-    #            "Is this a correct answer to the riddle?"
-    # targets = ["raft", "roll down hill", "rowboat", "water", "roll over"]
-    # target_log_P = {t: None for t in targets}
-    # for target in target_log_P:
-    #     input_ids = tokenizer(sentence.replace("[MASK]", target), return_tensors="pt").input_ids
-    #     k = 5
-    #     generated_outputs = model.generate(input_ids, do_sample=True, top_p=0.95, num_return_sequences=k,
-    #                                        output_scores=True, max_length=160, output_hidden_states=True,
-    #                                        output_attentions=True, return_dict_in_generate=True,
-    #                                        pad_token_id=tokenizer.eos_token_id)
-    #
-    #
-
-    # l_acc = get_log_discrimination_accuracy(model, tokenizer, dataset)
-
-    # new_dataset = {
-    #     'train': {},
-    #     'validation': {},
-    #     'test': {}}
-    #
-    # for split in ['train', 'validation', 'test']:
-    #     for entry in original_dataset[split]:
-    #         question = entry['question']
-    #         for i in range(len(entry['choices']['text'])):
-    #             # encoding = tokenizer(question + ' [SEP]', choice, return_tensors='pt')
-    #             answer = entry['choices']['text'][i]
-    #             context = f'Q: {question} \nA: {answer.capitalize()} \nIs this a correct answer to the riddle?'
-    #             label = entry['choices']['label'][i] == entry['answerKey']
-    #             new_dataset[split][context] = label
