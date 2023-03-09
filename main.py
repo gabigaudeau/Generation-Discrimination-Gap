@@ -8,12 +8,10 @@ from RiddleSenseDataset import RiddleSenseDataset
 
 # Fields.
 SEED = 42
-MODEL_NAME = 'EleutherAI/pythia-70m-deduped'
-REVISION = 'step3000'
-CACHE_DIR = './pythia-70m-deduped/step3000'
 DISCRIMINATION_PROMPT = "Q: [QUESTION]\nA: [ANSWER]\nIs this a correct answer to the riddle?\n[OUTPUT]"
 GENERATION_PROMPT = "Q: [QUESTION]\nThe answer to the riddle is: [ANSWER]"
 K = 5  # Sample size.
+do_sample = K != 1
 
 
 def get_first_new_token(output, prompt):
@@ -31,7 +29,19 @@ def get_first_new_token(output, prompt):
     return None
 
 
-def get_discrimination_accuracy(model, tokenizer, dataset):
+def get_exact_match_prompt(answer, question, is_discrimination=False):
+    if is_discrimination:
+        return DISCRIMINATION_PROMPT \
+            .replace('[QUESTION]', question) \
+            .replace('[ANSWER]', answer) \
+            .replace('[OUTPUT]', "")
+    else:
+        return GENERATION_PROMPT \
+            .replace('[QUESTION]', question) \
+            .replace('[ANSWER]', "")
+
+
+def get_exact_match_accuracy(model, tokenizer, dataset, is_discrimination=False):
     correct_outputs = 0
     total_outputs = 0
 
@@ -44,59 +54,78 @@ def get_discrimination_accuracy(model, tokenizer, dataset):
                 print(f'Processed {total_outputs} data entries.')
 
             answer = entry.choices[label]
-
-            # exact match
-            prompt = DISCRIMINATION_PROMPT \
-                .replace('[QUESTION]', question) \
-                .replace('[ANSWER]', answer) \
-                .replace('[OUTPUT]', "")
+            prompt = get_exact_match_prompt(question, answer, is_discrimination)
 
             inputs = tokenizer(prompt, return_tensors="pt")
             tokens = model.generate(**inputs, max_length=160, pad_token_id=tokenizer.eos_token_id,
-                                    num_return_sequences=K, do_sample=True)
+                                    num_return_sequences=K, do_sample=do_sample)
 
             for k in range(K):
                 token = get_first_new_token(tokenizer.decode(tokens[k]), prompt)
                 if token is not None:
-                    if 'yes' == token.lower():
-                        if label == entry.answer_key:
+                    if is_discrimination:
+                        # Discrimination.
+                        if 'yes' == token.lower():
+                            if label == entry.answer_key:
+                                correct_outputs += 1
+                        # Anything else than yes is considered to be a "no".
+                        elif not label == entry.answer_key:
                             correct_outputs += 1
-                    # Anything else than yes is considered to be a "no".
-                    elif not label == entry.answer_key:
-                        correct_outputs += 1
+                    else:
+                        # Generation.
+                        # For multi-word expressions, we consider that if the output contains part of the answer,
+                        # it is correct.
+                        if token.lower() in answer:
+                            correct_outputs += 1
 
     return correct_outputs / (total_outputs * K)
 
 
-def get_generation_accuracy(model, tokenizer, dataset):
-    correct_outputs = 0
-    total_outputs = 0
-
-    for entry in dataset.entries['validation']:
-        total_outputs += 1
-        if total_outputs % 100 == 0:
-            print(f'Processed {total_outputs} data entries.')
-
-        question = entry.question
-        answer = entry.choices[entry.answer_key]
-
-        # exact match
-        prompt = GENERATION_PROMPT \
+def get_log_prompt(answer, question, output=None, is_discrimination=False):
+    if is_discrimination:
+        return DISCRIMINATION_PROMPT \
+                    .replace('[QUESTION]', question) \
+                    .replace('[ANSWER]', answer) \
+                    .replace('[OUTPUT]', output)
+    else:
+        return GENERATION_PROMPT \
             .replace('[QUESTION]', question) \
-            .replace('[ANSWER]', "")
+            .replace('[ANSWER]', answer)
 
-        inputs = tokenizer(prompt, return_tensors="pt")
-        tokens = model.generate(**inputs, max_length=160, pad_token_id=tokenizer.eos_token_id,
-                                num_return_sequences=K, do_sample=True)
 
-        for k in range(K):
-            token = get_first_new_token(tokenizer.decode(tokens[k]), prompt)
-            if token is not None:
-                # For multi-word expressions, we consider that if the output contains part of the answer, it is correct.
-                if token.lower() in answer:
-                    correct_outputs += 1
+def get_log_probabilities(model, input_ids):
+    outputs = model.generate(input_ids, max_length=160, pad_token_id=tokenizer.eos_token_id,
+                             return_dict_in_generate=True, output_scores=True,
+                             num_return_sequences=K, do_sample=do_sample)
 
-    return correct_outputs / (total_outputs * K)
+    gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
+    probs = torch.stack(outputs.scores, dim=1).softmax(-1)
+    return torch.gather(probs, 2, gen_sequences[:, :, None]).squeeze(-1)
+
+
+def get_token_probability(answer, input_ids, gen_probs, tokenizer):
+    # Deal with multi-word/long tokens.
+    # Assumption: sum the probabilities of the parts.
+    # https://stackoverflow.com/questions/59435020/get-probability-of-multi-token-word-in-mask-position
+
+    log_prob = 0
+    for k in range(K):
+        for token, p in zip(input_ids[0], gen_probs[k]):
+            if token not in tokenizer.all_special_ids:
+                # Deal with multi-word/long tokens.
+                # Assumption: sum the probabilities of the parts.
+                # https://stackoverflow.com/questions/59435020/get-probability-of-multi-token-word-in-mask-position
+                if tokenizer.decode(token) in answer:
+                    log_prob += p.item()
+
+    return log_prob
+
+
+def normalise_log_probabilities(log_prob):
+    # Convert to non-log probabilities.
+    prob = np.exp(np.array(log_prob))
+    # Normalise the probabilities.
+    return [p / sum(prob) for p in prob]
 
 
 def get_generation_log_accuracy(model, tokenizer, dataset):
@@ -114,37 +143,15 @@ def get_generation_log_accuracy(model, tokenizer, dataset):
 
         for label in entry.choices.keys():
             answer = entry.choices[label]
-
-            prompt = GENERATION_PROMPT \
-                .replace('[QUESTION]', question) \
-                .replace('[ANSWER]', answer)
+            prompt = get_log_prompt(answer, question)
 
             input_ids = tokenizer(prompt, return_tensors="pt").input_ids
-            outputs = model.generate(input_ids, max_length=160, pad_token_id=tokenizer.eos_token_id,
-                                     return_dict_in_generate=True, output_scores=True,
-                                     num_return_sequences=K, do_sample=True)
-
-            gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
-            probs = torch.stack(outputs.scores, dim=1).softmax(-1)
-            gen_probs = torch.gather(probs, 2, gen_sequences[:, :, None]).squeeze(-1)
-
-            log_prob = 0
-            for k in range(K):
-                for token, p in zip(input_ids[0], gen_probs[k]):
-                    if token not in tokenizer.all_special_ids:
-                        # Deal with multi-word/long tokens.
-                        # Assumption: sum the probabilities of the parts.
-                        # https://stackoverflow.com/questions/59435020/get-probability-of-multi-token-word-in-mask-position
-                        if tokenizer.decode(token) in answer:
-                            log_prob += p.item()
+            gen_probs = get_log_probabilities(model, input_ids)
+            log_prob = get_token_probability(answer, input_ids, gen_probs, tokenizer)
             probabilities.append(log_prob/K)
             labels.append(label)
 
-        # Convert to non-log probabilities.
-        probabilities = np.exp(np.array(probabilities))
-        # Normalise the probabilities.
-        normalised_probabilities = [p / sum(probabilities) for p in probabilities]
-
+        normalised_probabilities = normalise_log_probabilities(probabilities)
         for i in range(len(labels)):
             if labels[i] == entry.answer_key:
                 sum_log_probabilities += normalised_probabilities[i]
@@ -169,36 +176,14 @@ def get_discrimination_log_accuracy(model, tokenizer, dataset):
             probabilities = []
 
             for output in ["Yes", "No"]:
-                prompt = DISCRIMINATION_PROMPT \
-                    .replace('[QUESTION]', question) \
-                    .replace('[ANSWER]', answer) \
-                    .replace('[OUTPUT]', output)
+                prompt = get_log_prompt(answer, question, output, is_discrimination=True)
 
                 input_ids = tokenizer(prompt, padding=True, return_tensors="pt").input_ids
-                outputs = model.generate(input_ids, max_length=160, pad_token_id=tokenizer.eos_token_id,
-                                         return_dict_in_generate=True, output_scores=True,
-                                         num_return_sequences=K, do_sample=True)
-
-                gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
-                probs = torch.stack(outputs.scores, dim=1).softmax(-1)
-                gen_probs = torch.gather(probs, 2, gen_sequences[:, :, None]).squeeze(-1)
-
-                # Deal with multi-word/long tokens.
-                # Assumption: sum the probabilities of the parts.
-                # https://stackoverflow.com/questions/59435020/get-probability-of-multi-token-word-in-mask-position
-                log_prob = 0
-                for k in range(K):
-                    for token, p in zip(input_ids[0], gen_probs[k]):
-                        if token not in tokenizer.all_special_ids:
-                            if tokenizer.decode(token) in output:
-                                log_prob += p.item()
+                gen_probs = get_log_probabilities(model, input_ids)
+                log_prob = get_token_probability(answer, input_ids, gen_probs, tokenizer)
                 probabilities.append(log_prob/K)
 
-            # Convert to non-log probabilities.
-            probabilities = np.exp(np.array(probabilities))
-            # Normalise the probabilities.
-            normalised_probabilities = [p / sum(probabilities) for p in probabilities]
-
+            normalised_probabilities = normalise_log_probabilities(probabilities)
             if label == entry.answer_key:
                 sum_log_probabilities += normalised_probabilities[0]
             else:
@@ -210,6 +195,16 @@ def get_discrimination_log_accuracy(model, tokenizer, dataset):
 if __name__ == '__main__':
     # Setting the random seed.
     random.seed(SEED)
+
+    print("---- PREPARING DATASET ----\n")
+    # TODO. Do I need to do any pre-processing of the dataset?
+    dataset = RiddleSenseDataset()
+
+    print("\n---- GENERATION ----\n")
+    SIZE = '70m'
+    MODEL_NAME = f'EleutherAI/pythia-{SIZE}-deduped'
+    REVISION = 'step3000'
+    CACHE_DIR = f'./pythia-{SIZE}-deduped/step3000'
 
     tokenizer = AutoTokenizer.from_pretrained(
         MODEL_NAME,
@@ -227,22 +222,44 @@ if __name__ == '__main__':
         cache_dir=CACHE_DIR
     )
 
-    # TODO. Pre-process dataset.
-    dataset = RiddleSenseDataset()
-
-    print("Step 1: Generation exact match accuracy")
-    g_acc = get_generation_accuracy(model, tokenizer, dataset)
+    print(f"\nGeneration: Exact match accuracy for {MODEL_NAME}")
+    g_acc = get_exact_match_accuracy(model, tokenizer, dataset)
     print(g_acc)
 
-    print("\nStep 2: Discrimination exact match accuracy")
-    d_acc = get_discrimination_accuracy(model, tokenizer, dataset)
-    print(d_acc)
-
-    print("\nStep 3: Generation log accuracy")
+    print(f"\nGeneration: Log probability accuracy for {MODEL_NAME}")
     g_log_acc = get_generation_log_accuracy(model, tokenizer, dataset)
     print(g_log_acc)
 
-    print("\nStep 4: Discrimination log accuracy")
+    print("\n---- DISCRIMINATION ----\n")
+    SIZE = '70m'
+    MODEL_NAME = f'EleutherAI/pythia-{SIZE}-deduped'
+    REVISION = 'step3000'
+    CACHE_DIR = f'./pythia-{SIZE}-deduped/step3000'
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        MODEL_NAME,
+        revision=REVISION,
+        cache_dir=CACHE_DIR,
+    )
+
+    tokenizer.pad_token = tokenizer.eos_token
+
+    # Vary model sizes:
+    # 70M, 160M, 410M, 1B, 1.4B, 2.8B, 6.9B, and 12B.
+    model = GPTNeoXForCausalLM.from_pretrained(
+        MODEL_NAME,
+        revision=REVISION,
+        cache_dir=CACHE_DIR
+    )
+
+    print(f"\nDiscrimination: Exact match accuracy for {MODEL_NAME}")
+    d_acc = get_exact_match_accuracy(model, tokenizer, dataset)
+    print(d_acc)
+
+    print(f"\nDiscrimination: Log probability accuracy for {MODEL_NAME}")
     d_log_acc = get_discrimination_log_accuracy(model, tokenizer, dataset)
     print(d_log_acc)
+
+
+
 
