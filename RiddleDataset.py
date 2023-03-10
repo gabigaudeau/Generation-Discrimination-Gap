@@ -25,19 +25,19 @@ class RiddleSenseDataset(Dataset):
         entry = self.data[index]
 
         if self.is_generation:
-            prompt = self.GENERATION_PROMPT \
+            self.prompt = self.GENERATION_PROMPT \
                 .replace('[QUESTION]', entry.question) \
                 .replace('[ANSWER]', "")
         else:
-            prompt = self.DISCRIMINATION_PROMPT \
+            self.prompt = self.DISCRIMINATION_PROMPT \
                 .replace('[QUESTION]', entry.question) \
                 .replace('[ANSWER]', entry.answer) \
                 .replace('[OUTPUT]', "")
 
-        input_ids = self.tokenizer(prompt, return_tensors="pt", truncation=True, padding='max_length',
+        input_ids = self.tokenizer(self.prompt, return_tensors="pt", truncation=True, padding='max_length',
                                    max_length=self.max_len).input_ids
 
-        return input_ids, entry.answer, entry.is_correct
+        return input_ids, entry.answer, entry.is_correct, self.prompt
 
 
 class DataEntry:
