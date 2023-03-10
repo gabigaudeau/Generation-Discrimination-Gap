@@ -5,18 +5,23 @@ class RiddleSenseDataset(Dataset):
     DISCRIMINATION_PROMPT = "Q: [QUESTION]\nA: [ANSWER]\nIs this a correct answer to the riddle?\n[OUTPUT]"
     GENERATION_PROMPT = "Q: [QUESTION]\nThe answer to the riddle is: [ANSWER]"
 
-    def __init__(self, data, tokenizer, max_len, is_generation):
+    def __init__(self, data, tokenizer, max_len, is_generation, is_exact_match):
         self.data = []
         for entry in data:
             question = entry['question']
             for i in range(len(entry['choices']['text'])):
                 label = entry['choices']['label'][i]
                 answer = entry['choices']['text'][i]
-                self.data.append(DataEntry(question, answer, label == entry['answerKey']))
+                if not is_generation and not is_exact_match:
+                    self.data.append(DataEntry(question, answer, label == entry['answerKey'], 'Yes'))
+                    self.data.append(DataEntry(question, answer, label == entry['answerKey'], 'No'))
+                else:
+                    self.data.append(DataEntry(question, answer, label == entry['answerKey']))
 
         self.tokenizer = tokenizer
         self.max_len = max_len
         self.is_generation = is_generation
+        self.is_exact_match = is_exact_match
 
     def __len__(self):
         return len(self.data)
@@ -25,14 +30,19 @@ class RiddleSenseDataset(Dataset):
         entry = self.data[index]
 
         if self.is_generation:
-            self.prompt = self.GENERATION_PROMPT \
-                .replace('[QUESTION]', entry.question) \
-                .replace('[ANSWER]', "")
+            self.prompt = self.GENERATION_PROMPT
         else:
-            self.prompt = self.DISCRIMINATION_PROMPT \
-                .replace('[QUESTION]', entry.question) \
-                .replace('[ANSWER]', entry.answer) \
-                .replace('[OUTPUT]', "")
+            self.prompt = self.DISCRIMINATION_PROMPT
+
+        self.prompt.replace('[QUESTION]', entry.question)
+
+        if self.is_exact_match:
+            self.prompt.replace('[ANSWER]', "")
+        else:
+            self.prompt.replace('[ANSWER]', entry.answer)
+
+        # Will only do so when an output is provided.
+        self.prompt.replace('[OUTPUT]', entry.output)
 
         input_ids = self.tokenizer(self.prompt, return_tensors="pt", truncation=True, padding='max_length',
                                    max_length=self.max_len).input_ids
@@ -52,7 +62,8 @@ class DataEntry:
             'text': ['throw', 'bit', 'gallon', 'mouse', 'hole']
     """
 
-    def __init__(self, question, answer, is_correct):
+    def __init__(self, question, answer, is_correct, output=""):
         self.question = question
         self.answer = answer
         self.is_correct = is_correct
+        self.output = output
