@@ -13,8 +13,8 @@ class RiddleSenseDataset(Dataset):
                 label = entry['choices']['label'][i]
                 answer = entry['choices']['text'][i]
                 if not is_generation and not is_exact_match:
-                    self.data.append(DataEntry(question, answer, label == entry['answerKey'], 'Yes'))
-                    self.data.append(DataEntry(question, answer, label == entry['answerKey'], 'No'))
+                    self.data.append(DataEntry(question, answer, label == entry['answerKey'], 'yes'))
+                    self.data.append(DataEntry(question, answer, label == entry['answerKey'], 'no'))
                 else:
                     self.data.append(DataEntry(question, answer, label == entry['answerKey']))
 
@@ -30,24 +30,25 @@ class RiddleSenseDataset(Dataset):
         entry = self.data[index]
 
         if self.is_generation:
-            self.prompt = self.GENERATION_PROMPT
+            prompt = self.GENERATION_PROMPT
+            if self.is_exact_match:
+                prompt = prompt.replace('[ANSWER]', "")
         else:
-            self.prompt = self.DISCRIMINATION_PROMPT
+            prompt = self.DISCRIMINATION_PROMPT
+            prompt = prompt.replace('[ANSWER]', entry.answer)
 
-        self.prompt.replace('[QUESTION]', entry.question)
-
-        if self.is_exact_match:
-            self.prompt.replace('[ANSWER]', "")
-        else:
-            self.prompt.replace('[ANSWER]', entry.answer)
+        prompt = prompt.replace('[QUESTION]', entry.question)
 
         # Will only do so when an output is provided.
-        self.prompt.replace('[OUTPUT]', entry.output)
+        self.prompt = prompt.replace('[OUTPUT]', entry.output)
 
         input_ids = self.tokenizer(self.prompt, return_tensors="pt", truncation=True, padding='max_length',
                                    max_length=self.max_len).input_ids
 
-        return input_ids, entry.answer, entry.is_correct, self.prompt
+        if entry.output == "":
+            return input_ids, entry.answer, entry.is_correct, self.prompt
+        else:
+            return input_ids, entry.output, entry.is_correct, self.prompt
 
 
 class DataEntry:

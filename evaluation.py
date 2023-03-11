@@ -22,6 +22,19 @@ def get_first_new_token(output, prompt):
     return None, None
 
 
+def get_token_probability(answer, input_ids, gen_probs, tokenizer):
+    # Deal with multi-word/long tokens.
+    # Assumption: sum the probabilities of the parts.
+    # https://stackoverflow.com/questions/59435020/get-probability-of-multi-token-word-in-mask-position
+    log_prob = 0
+    for token, p in zip(input_ids, gen_probs):
+        if token not in tokenizer.all_special_ids:
+            if tokenizer.decode(token) in answer:
+                log_prob += p.item()
+
+    return log_prob
+
+
 def normalise_log_probabilities(log_prob):
     # Convert to non-log probabilities.
     prob = np.exp(np.array(log_prob))
@@ -193,6 +206,7 @@ if __name__ == '__main__':
         for sample in range(BATCH_SIZE):
             sample_score = 0
             for k in range(K):
+                print(prompts[sample])
                 token, _ = get_first_new_token(tokens[index], prompts[sample])
                 if (token.lower() == 'yes' and labels[sample]) or (token.lower() == 'no' and not labels[sample]) :
                     sample_score += 1
@@ -219,7 +233,7 @@ if __name__ == '__main__':
 
         input_ids = input_ids.squeeze(1).to(device)
         outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
-                                 do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH + 20,
+                                 do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH,
                                  return_dict_in_generate=True, output_scores=True)
         tokens = tokenizer.batch_decode(outputs.sequences, skip_special_tokens=True)
         gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
@@ -231,13 +245,7 @@ if __name__ == '__main__':
         for sample in range(BATCH_SIZE):
             log_prob = 0
             for k in range(K):
-                token, token_index = get_first_new_token(tokens[index], prompts[sample])
-                for i in range(token_index, len(input_ids)):
-                    # Deal with multi-word/long tokens.
-                    # Assumption: sum the probabilities of the parts.
-                    # https://stackoverflow.com/questions/59435020/get-probability-of-multi-token-word-in-mask-position
-                    if token in answers[sample]:
-                        log_prob += gen_probs[index][i].item()
+                log_prob = get_token_probability(answers[sample], input_ids[sample], gen_probs[index], tokenizer)
                 index += 1
             probabilities.append(log_prob / K)
 
