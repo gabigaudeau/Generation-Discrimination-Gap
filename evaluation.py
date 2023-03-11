@@ -100,7 +100,7 @@ if __name__ == '__main__':
     #
     #
     #
-    # LOG PROB
+    # LOG PROB.
     valid_set = RiddleSenseDataset(original_dataset['validation'], tokenizer, MAX_SEQUENCE_LENGTH,
                                    is_generation=True, is_exact_match=False)
     valid_loader = DataLoader(valid_set, batch_size=BATCH_SIZE)
@@ -147,3 +147,109 @@ if __name__ == '__main__':
                 break
 
     print(f"Log match accuracy: {sum_log_probabilities / number_of_batches}")
+
+    print("\n---- DISCRIMINATION ----\n")
+    SIZE = '70m'
+    MODEL_NAME = f'EleutherAI/pythia-{SIZE}-deduped'
+    REVISION = 'step3000'
+    CACHE_DIR = f'./pythia-{SIZE}-deduped/step3000'
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        MODEL_NAME,
+        revision=REVISION,
+        cache_dir=CACHE_DIR,
+    )
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = 'left'
+
+    model = GPTNeoXForCausalLM.from_pretrained(
+        MODEL_NAME,
+        revision=REVISION,
+        cache_dir=CACHE_DIR
+    )
+    model.to(device)
+
+    #
+    #
+    #
+    # EXACT MATCH.
+    valid_set = RiddleSenseDataset(original_dataset['validation'], tokenizer, MAX_SEQUENCE_LENGTH,
+                                   is_generation=False, is_exact_match=True)
+    valid_loader = DataLoader(valid_set, batch_size=BATCH_SIZE)
+    number_of_batches = len(valid_loader)
+    processed_batches = 0
+    total_score = 0
+    for input_ids, answers, labels, prompts in iter(valid_loader):
+        processed_batches += 1
+        if processed_batches % 10 == 0:
+            print(f'Processed {processed_batches}/{number_of_batches} batches.')
+
+        input_ids = input_ids.squeeze(1).to(device)
+        outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
+                                 do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH + 20)
+        tokens = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+        index = 0
+        for sample in range(BATCH_SIZE):
+            sample_score = 0
+            for k in range(K):
+                token, _ = get_first_new_token(tokens[index], prompts[sample])
+                if (token.lower() == 'yes' and labels[sample]) or (token.lower() == 'no' and not labels[sample]) :
+                    sample_score += 1
+                index += 1
+            total_score += sample_score / K
+
+    print(f"Exact match accuracy: {total_score / number_of_batches}")
+
+    #
+    #
+    #
+    # LOG PROB.
+    valid_set = RiddleSenseDataset(original_dataset['validation'], tokenizer, MAX_SEQUENCE_LENGTH,
+                                   is_generation=False, is_exact_match=False)
+    valid_loader = DataLoader(valid_set, batch_size=BATCH_SIZE)
+
+    number_of_batches = len(valid_loader)
+    processed_batches = 0
+    sum_log_probabilities = 0
+    for input_ids, answers, labels, prompts in iter(valid_loader):
+        processed_batches += 1
+        if processed_batches % 50 == 0:
+            print(f'Processed {processed_batches}/{number_of_batches} batches.')
+
+        input_ids = input_ids.squeeze(1).to(device)
+        outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
+                                 do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH + 20,
+                                 return_dict_in_generate=True, output_scores=True)
+        tokens = tokenizer.batch_decode(outputs.sequences, skip_special_tokens=True)
+        gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
+        scores = torch.stack(outputs.scores, dim=1).softmax(-1)
+        gen_probs = torch.gather(scores, 2, gen_sequences[:, :, None]).squeeze(-1)
+
+        probabilities = []
+        index = 0
+        for sample in range(BATCH_SIZE):
+            log_prob = 0
+            for k in range(K):
+                token, token_index = get_first_new_token(tokens[index], prompts[sample])
+                for i in range(token_index, len(input_ids)):
+                    # Deal with multi-word/long tokens.
+                    # Assumption: sum the probabilities of the parts.
+                    # https://stackoverflow.com/questions/59435020/get-probability-of-multi-token-word-in-mask-position
+                    if token in answers[sample]:
+                        log_prob += gen_probs[index][i].item()
+                index += 1
+            probabilities.append(log_prob / K)
+
+        normalised_probabilities = []
+        for i in range(0, BATCH_SIZE, 2):
+            normalised_probabilities += normalise_log_probabilities(probabilities[i:i + 2])
+
+        for sample in range(0, BATCH_SIZE, 2):
+            if labels[sample]:
+                sum_log_probabilities += normalised_probabilities[sample]
+            else:
+                sum_log_probabilities += normalised_probabilities[sample + 1]
+
+    print(f"Log match accuracy: {sum_log_probabilities / number_of_batches}")
+

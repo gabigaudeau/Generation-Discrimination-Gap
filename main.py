@@ -5,9 +5,9 @@ import random
 
 from RiddleSenseDataset import RiddleSenseDataset
 
-
 # Fields.
 SEED = 42
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 DISCRIMINATION_PROMPT = "Q: [QUESTION]\nA: [ANSWER]\nIs this a correct answer to the riddle?\n[OUTPUT]"
 GENERATION_PROMPT = "Q: [QUESTION]\nThe answer to the riddle is: [ANSWER]"
 K = 5  # Sample size.
@@ -64,12 +64,9 @@ def get_exact_match_accuracy(model, tokenizer, dataset, is_discrimination=False)
                 token = get_first_new_token(tokenizer.decode(tokens[k]), prompt)
                 if token is not None:
                     if is_discrimination:
-                        # Discrimination.
-                        if 'yes' == token.lower():
-                            if label == entry.answer_key:
-                                correct_outputs += 1
-                        # Anything else than yes is considered to be a "no".
-                        elif not label == entry.answer_key:
+                        # TODO. Should anything else than 'yes' be considered to be a 'no'?
+                        if ('yes' == token.lower() and label == entry.answer_key) or \
+                                ('no' == token.lower() and not label == entry.answer_key):
                             correct_outputs += 1
                     else:
                         # Generation.
@@ -84,16 +81,16 @@ def get_exact_match_accuracy(model, tokenizer, dataset, is_discrimination=False)
 def get_log_prompt(answer, question, output=None, is_discrimination=False):
     if is_discrimination:
         return DISCRIMINATION_PROMPT \
-                    .replace('[QUESTION]', question) \
-                    .replace('[ANSWER]', answer) \
-                    .replace('[OUTPUT]', output)
+            .replace('[QUESTION]', question) \
+            .replace('[ANSWER]', answer) \
+            .replace('[OUTPUT]', output)
     else:
         return GENERATION_PROMPT \
             .replace('[QUESTION]', question) \
             .replace('[ANSWER]', answer)
 
 
-def get_log_probabilities(model, input_ids):
+def get_log_probabilities(model, input_ids, tokenizer):
     outputs = model.generate(input_ids, max_length=160, pad_token_id=tokenizer.eos_token_id,
                              return_dict_in_generate=True, output_scores=True,
                              num_return_sequences=K, do_sample=do_sample)
@@ -146,9 +143,9 @@ def get_generation_log_accuracy(model, tokenizer, dataset):
             prompt = get_log_prompt(answer, question)
 
             input_ids = tokenizer(prompt, return_tensors="pt").input_ids
-            gen_probs = get_log_probabilities(model, input_ids)
+            gen_probs = get_log_probabilities(model, input_ids, tokenizer)
             log_prob = get_token_probability(answer, input_ids, gen_probs, tokenizer)
-            probabilities.append(log_prob/K)
+            probabilities.append(log_prob / K)
             labels.append(label)
 
         normalised_probabilities = normalise_log_probabilities(probabilities)
@@ -179,9 +176,9 @@ def get_discrimination_log_accuracy(model, tokenizer, dataset):
                 prompt = get_log_prompt(answer, question, output, is_discrimination=True)
 
                 input_ids = tokenizer(prompt, padding=True, return_tensors="pt").input_ids
-                gen_probs = get_log_probabilities(model, input_ids)
+                gen_probs = get_log_probabilities(model, input_ids, tokenizer)
                 log_prob = get_token_probability(answer, input_ids, gen_probs, tokenizer)
-                probabilities.append(log_prob/K)
+                probabilities.append(log_prob / K)
 
             normalised_probabilities = normalise_log_probabilities(probabilities)
             if label == entry.answer_key:
@@ -192,6 +189,7 @@ def get_discrimination_log_accuracy(model, tokenizer, dataset):
     return sum_log_probabilities / total_outputs
 
 
+
 if __name__ == '__main__':
     # Setting the random seed.
     random.seed(SEED)
@@ -200,7 +198,7 @@ if __name__ == '__main__':
     # TODO. Do I need to do any pre-processing of the dataset?
     dataset = RiddleSenseDataset()
 
-    print("\n---- GENERATION ----\n")
+    print("\n---- GENERATION ----")
     SIZE = '70m'
     MODEL_NAME = f'EleutherAI/pythia-{SIZE}-deduped'
     REVISION = 'step3000'
@@ -230,7 +228,7 @@ if __name__ == '__main__':
     g_log_acc = get_generation_log_accuracy(model, tokenizer, dataset)
     print(g_log_acc)
 
-    print("\n---- DISCRIMINATION ----\n")
+    print("\n---- DISCRIMINATION ----")
     SIZE = '70m'
     MODEL_NAME = f'EleutherAI/pythia-{SIZE}-deduped'
     REVISION = 'step3000'
@@ -259,7 +257,3 @@ if __name__ == '__main__':
     print(f"\nDiscrimination: Log probability accuracy for {MODEL_NAME}")
     d_log_acc = get_discrimination_log_accuracy(model, tokenizer, dataset)
     print(d_log_acc)
-
-
-
-
