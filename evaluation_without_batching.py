@@ -3,7 +3,7 @@ import torch
 import numpy as np
 import random
 
-from RiddleSenseDataset import RiddleSenseDataset
+from RiddleDataset_without_batching import RiddleSenseDataset
 
 # Fields.
 SEED = 42
