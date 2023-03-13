@@ -56,7 +56,7 @@ if __name__ == '__main__':
 
     # Setting the random seed.
     random.seed(RANDOM_SEED)
-    torch.manual_seed(0)
+    torch.manual_seed(RANDOM_SEED)
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     print(device)
 
