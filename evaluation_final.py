@@ -213,12 +213,14 @@ if __name__ == '__main__':
                             answer_split = answers[sample].split(" ")
 
                             idx = 0
-                            while token.lower() == answer_split[idx] and idx < len(answer_split):
-                                idx += 1
-                                if token_index + 1 < len(tokens[index]):
-                                    token = tokens[index][token_index + 1]
-                                else:
-                                    break
+                            while idx < len(answer_split):
+                                if token.lower() == answer_split[idx]:
+                                    idx += 1
+                                    token_index += 1
+                                    if token_index < len(tokens[index]):
+                                        token = tokens[index][token_index]
+                                    else:
+                                        break
 
                             if idx == len(answer_split):
                                 sample_score += 1
@@ -247,13 +249,26 @@ if __name__ == '__main__':
                 probabilities = []
                 index = 0
                 for sample in range(len(answers)):
+                    answer_split = answers[sample].split(" ")
                     log_prob = 0
                     for k in range(K):
                         token, token_index = get_first_new_token(tokens[index], prompts[sample])
-                        if token is not None:
-                            for i in range(token_index, len(input_ids)):
-                                if token.lower() in answers[sample]:
-                                    log_prob += gen_probs[index][i].item()
+
+                        idx = 0
+                        answer_prob = 0
+                        while idx < len(answer_split):
+                            if token.lower() == answer_split[idx]:
+                                answer_prob += gen_probs[index][token_index].item()
+
+                                idx += 1
+                                token_index += 1
+                                if token_index < len(tokens[index]):
+                                    token = tokens[index][token_index]
+                                else:
+                                    break
+
+                        if idx == len(answer_split):
+                            log_prob += answer_prob
                         index += 1
                     probabilities.append(log_prob / K)
 
