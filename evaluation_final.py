@@ -247,37 +247,23 @@ if __name__ == '__main__':
                     outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
                                              do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH,
                                              use_cache=True, return_dict_in_generate=True, output_scores=True)
-                tokens = tokenizer.batch_decode(outputs.sequences, skip_special_tokens=True)
                 gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
                 scores = torch.stack(outputs.scores, dim=1).softmax(-1)
                 gen_probs = torch.gather(scores, 2, gen_sequences[:, :, None]).squeeze(-1)
 
                 probabilities = []
-                index = 0
                 for sample in range(len(answers)):
-                    answer_split = answers[sample].split(" ")
+                    answer = answers[sample]
                     log_prob = 0
+                    token_index = len(input_ids[sample]) - 1
+                    token = tokenizer.decode(input_ids[sample][token_index])
                     for k in range(K):
-                        token, token_index = get_answer_first_index(tokens[index], prompts[sample])
-
-                        idx = 0
-                        answer_prob = 0
-                        while idx < len(answer_split):
-                            if token.lower() == answer_split[idx]:
-                                answer_prob += gen_probs[index][token_index].item()
-
-                                idx += 1
-                                token_index += 1
-                                if token_index < len(tokens[index]):
-                                    token = tokens[index][token_index]
-                                else:
-                                    break
-                            else:
-                                break
-
-                        if idx == len(answer_split):
-                            log_prob += answer_prob
-                        index += 1
+                        while token in answer:
+                            print(token_index)
+                            log_prob += gen_probs[k][token_index].item()
+                            # Won't turn into an infinite loop since we put the answer at the end ourselves.
+                            token_index -= 1
+                            token = tokenizer.decode(input_ids[sample][token_index])
                     probabilities.append(log_prob / K)
 
                 normalised_probabilities = []
@@ -338,19 +324,17 @@ if __name__ == '__main__':
                     outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
                                              do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH,
                                              use_cache=True, return_dict_in_generate=True, output_scores=True)
-                tokens = tokenizer.batch_decode(outputs.sequences, skip_special_tokens=True)
                 gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
                 scores = torch.stack(outputs.scores, dim=1).softmax(-1)
                 gen_probs = torch.gather(scores, 2, gen_sequences[:, :, None]).squeeze(-1)
 
                 probabilities = []
-                index = 0
                 for sample in range(len(answers)):
                     log_prob = 0
+                    # The answer yes/no is always the last token and won't be split.
+                    token_index = len(input_ids[sample]) - 1
                     for k in range(K):
-                        log_prob = get_token_probability(answers[sample], input_ids[sample], gen_probs[index],
-                                                         tokenizer)
-                        index += 1
+                        log_prob += gen_probs[k][token_index].item()
                     probabilities.append(log_prob / K)
 
                 normalised_probabilities = []
