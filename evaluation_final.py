@@ -125,7 +125,8 @@ def write_to_file(is_generation, is_exact_match, result):
         accuracy = "logprob"
 
     # Write results
-    file = open(f"{os.path.dirname(os.path.abspath(__file__))}/results/{SIZE}_{task}_{accuracy}.txt", "w")
+    file = open(f"{os.path.dirname(os.path.abspath(__file__))}/results/{SIZE}_{task}_{accuracy}_batch_{BATCH_SIZE}.txt",
+                "w")
     file.write(f"{accuracy} for {task} model {SIZE}")
     file.write("\n----------------------\n")
     file.write(f"{result}  | ")
@@ -144,9 +145,10 @@ if __name__ == '__main__':
     print(f"IS EXACT MATCH: {is_exact_match}")
     SIZE = sys.argv[3]  # 70M, 160M, 410M, 1B, 1.4B, 2.8B, 6.9B, and 12B.
     print(f"MODEL SIZE: {SIZE}")
+    BATCH_SIZE = sys.argv[4]  # Need to be multiple of 2 * K.
+    print(f"BATCH SIZE: {BATCH_SIZE}")
 
     RANDOM_SEED = 42
-    BATCH_SIZE = 10  # Need to be multiple of 2 * K.
     K = 5
     DO_SAMPLE = K != 1
     MAX_SEQUENCE_LENGTH = 160
@@ -221,6 +223,8 @@ if __name__ == '__main__':
                                         token = tokens[index][token_index]
                                     else:
                                         break
+                                else:
+                                    break
 
                             if idx == len(answer_split):
                                 sample_score += 1
@@ -266,6 +270,8 @@ if __name__ == '__main__':
                                     token = tokens[index][token_index]
                                 else:
                                     break
+                            else:
+                                break
 
                         if idx == len(answer_split):
                             log_prob += answer_prob
