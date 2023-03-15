@@ -10,8 +10,8 @@ from torch.utils.data import Dataset
 
 
 class RiddleSenseDataset(Dataset):
-    DISCRIMINATION_PROMPT = "Q: [QUESTION]\nA: [ANSWER]\nIs this a correct answer to the riddle?\n[OUTPUT]"
-    GENERATION_PROMPT = "Q: [QUESTION]\nThe answer to the riddle is: [ANSWER]"
+    DISCRIMINATION_PROMPT = "[QUESTION]\nIs [ANSWER] a correct answer to the riddle?\n[OUTPUT]"
+    GENERATION_PROMPT = "[QUESTION]\nThe answer to the riddle is: [ANSWER]"
 
     def __init__(self, data, tokenizer, max_len, is_generation, is_exact_match):
         self.data = []
@@ -41,6 +41,8 @@ class RiddleSenseDataset(Dataset):
             prompt = self.GENERATION_PROMPT
             if self.is_exact_match:
                 prompt = prompt.replace('[ANSWER]', "")
+            else:
+                prompt = prompt.replace('[ANSWER]', entry.answer)
         else:
             prompt = self.DISCRIMINATION_PROMPT
             prompt = prompt.replace('[ANSWER]', entry.answer)
@@ -243,7 +245,7 @@ if __name__ == '__main__':
                 input_ids = input_ids.squeeze(1).to(device)
                 with torch.inference_mode():
                     outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
-                                             do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH + 10,
+                                             do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH,
                                              use_cache=True, return_dict_in_generate=True, output_scores=True)
                 tokens = tokenizer.batch_decode(outputs.sequences, skip_special_tokens=True)
                 gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
@@ -256,7 +258,7 @@ if __name__ == '__main__':
                     answer_split = answers[sample].split(" ")
                     log_prob = 0
                     for k in range(K):
-                        token, token_index = get_first_new_token(tokens[index], prompts[sample])
+                        token, token_index = get_answer_first_index(tokens[index], prompts[sample])
 
                         idx = 0
                         answer_prob = 0
@@ -334,7 +336,7 @@ if __name__ == '__main__':
 
                 with torch.inference_mode():
                     outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
-                                             do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH + 10,
+                                             do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH,
                                              use_cache=True, return_dict_in_generate=True, output_scores=True)
                 tokens = tokenizer.batch_decode(outputs.sequences, skip_special_tokens=True)
                 gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
