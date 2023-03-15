@@ -95,19 +95,6 @@ def get_first_new_token(output, prompt):
     return None, None
 
 
-def get_token_probability(answer, input_ids, gen_probs, tokenizer):
-    # Deal with multi-word/long tokens.
-    # Assumption: sum the probabilities of the parts.
-    # https://stackoverflow.com/questions/59435020/get-probability-of-multi-token-word-in-mask-position
-    log_prob = 0
-    for token, p in zip(input_ids, gen_probs):
-        if token not in tokenizer.all_special_ids:
-            if tokenizer.decode(token) in answer:
-                log_prob += p.item()
-
-    return log_prob
-
-
 def normalise_log_probabilities(log_prob):
     # Convert to non-log probabilities.
     prob = np.exp(np.array(log_prob))
@@ -253,6 +240,9 @@ if __name__ == '__main__':
 
                 probabilities = []
                 for sample in range(len(answers)):
+                    # Deal with multi-word/long tokens.
+                    # Assumption: sum the probabilities of the parts.
+                    # https://stackoverflow.com/questions/59435020/get-probability-of-multi-token-word-in-mask-position
                     answer = answers[sample]
                     log_prob = 0
                     token_index = len(input_ids[sample]) - 1
