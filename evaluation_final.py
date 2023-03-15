@@ -120,48 +120,52 @@ def write_to_file(is_generation, is_exact_match, result):
         task = "discrimination"
 
     if is_exact_match:
-        accuracy = "exact_match"
+        accuracy = "exactmatch"
     else:
-        accuracy = "log_prob"
+        accuracy = "logprob"
 
     # Write results
-    file = open(f"{os.path.dirname(os.path.abspath(__file__))}/results/{accuracy}_evaluation_{task}_{SIZE}.txt", "w")
-    file.write(f"{accuracy} for{task} model {SIZE}")
-    file.write("\n-----------------------------------------------\n")
+    file = open(f"{os.path.dirname(os.path.abspath(__file__))}/results/{SIZE}_{task}_{accuracy}.txt", "w")
+    file.write(f"{accuracy} for {task} model {SIZE}")
+    file.write("\n----------------------\n")
     file.write(f"{result}  | ")
-    file.write("\n-----------------------------------------------\n\n")
+    file.write("\n----------------------\n\n")
+
     file.close()
 
 
 if __name__ == '__main__':
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-    print(f"Using: {device}")
+    print(f"Using: {device}\n")
 
-    is_generation = sys.argv[0]
-    is_exact_match = sys.argv[1]
-    SIZE = sys.argv[2]  # 70M, 160M, 410M, 1B, 1.4B, 2.8B, 6.9B, and 12B.
+    is_generation = sys.argv[1] == '0'
+    print(f"IS GENERATION: {is_generation}")
+    is_exact_match = sys.argv[2] == '0'
+    print(f"IS EXACT MATCH: {is_exact_match}")
+    SIZE = sys.argv[3]  # 70M, 160M, 410M, 1B, 1.4B, 2.8B, 6.9B, and 12B.
+    print(f"MODEL SIZE: {SIZE}")
+
     RANDOM_SEED = 42
     BATCH_SIZE = 10  # Need to be multiple of 2 * K.
     K = 5
     DO_SAMPLE = K != 1
     MAX_SEQUENCE_LENGTH = 160
+    REVISION = "step143000"
     MODEL_NAME = f'EleutherAI/pythia-{SIZE}-deduped'
-    CACHE_DIR = f'{os.path.dirname(os.path.abspath(__file__))}/pythia-{SIZE}-deduped/'
+    CACHE_DIR = f'{os.path.dirname(os.path.abspath(__file__))}/pythia-{SIZE}-deduped/{REVISION}'
 
     # Setting the random seed.
     random.seed(RANDOM_SEED)
     torch.manual_seed(RANDOM_SEED)
     set_seed(RANDOM_SEED)
 
-    print("---- PREPARING DATASET ----\n")
+    print("\n---- PREPARING DATASET ----")
     # TODO. Do I need to do any pre-processing of the dataset?
     original_dataset = load_dataset('riddle_sense')
 
     tokenizer = AutoTokenizer.from_pretrained(
         MODEL_NAME,
         cache_dir=CACHE_DIR,
-        torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
     )
 
     tokenizer.pad_token = tokenizer.eos_token
@@ -169,7 +173,9 @@ if __name__ == '__main__':
 
     model = GPTNeoXForCausalLM.from_pretrained(
         MODEL_NAME,
-        cache_dir=CACHE_DIR
+        cache_dir=CACHE_DIR,
+        torch_dtype=torch.float16,
+        low_cpu_mem_usage=True,
     )
     model.to(device)
 
@@ -202,9 +208,19 @@ if __name__ == '__main__':
                 for sample in range(len(answers)):
                     sample_score = 0
                     for k in range(K):
-                        token, _ = get_first_new_token(tokens[index], prompts[sample])
+                        token, token_index = get_first_new_token(tokens[index], prompts[sample])
                         if token is not None:
-                            if token.lower() in answers[sample]:
+                            answer_split = answers[sample].split(" ")
+
+                            idx = 0
+                            while token.lower() == answer_split[idx] and idx < len(answer_split):
+                                idx += 1
+                                if token_index + 1 < len(tokens[index]):
+                                    token = tokens[index][token_index + 1]
+                                else:
+                                    break
+
+                            if idx == len(answer_split):
                                 sample_score += 1
                         index += 1
                     total_score += sample_score / K
@@ -236,7 +252,7 @@ if __name__ == '__main__':
                         token, token_index = get_first_new_token(tokens[index], prompts[sample])
                         if token is not None:
                             for i in range(token_index, len(input_ids)):
-                                if token in answers[sample]:
+                                if token.lower() in answers[sample]:
                                     log_prob += gen_probs[index][i].item()
                         index += 1
                     probabilities.append(log_prob / K)
