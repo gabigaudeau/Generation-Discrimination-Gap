@@ -75,8 +75,8 @@ class DataEntry:
     """
 
     def __init__(self, question, answer, is_correct, output=""):
-        self.question = question
-        self.answer = answer
+        self.question = question.strip()
+        self.answer = answer.strip()
         self.is_correct = is_correct
         self.output = output
 
@@ -152,7 +152,6 @@ if __name__ == '__main__':
     set_seed(RANDOM_SEED)
 
     print("\n---- PREPARING DATASET ----")
-    # TODO. Do I need to do any pre-processing of the dataset?
     original_dataset = load_dataset('riddle_sense')
 
     # Split validation set into two.
@@ -168,6 +167,14 @@ if __name__ == '__main__':
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = 'left'
 
+    # A few pre-processing steps.
+    valid_set = RiddleSenseDataset(eval_dataset, tokenizer, MAX_SEQUENCE_LENGTH,
+                                   is_generation=is_generation, is_exact_match=is_exact_match)
+    valid_loader = DataLoader(valid_set, batch_size=BATCH_SIZE)
+    total_entries = len(valid_set.data)
+    number_of_batches = len(valid_loader)
+
+    print("\n---- DOWNLOADING MODEL ----")
     model = GPTNeoXForCausalLM.from_pretrained(
         MODEL_NAME,
         cache_dir=CACHE_DIR,
@@ -175,12 +182,6 @@ if __name__ == '__main__':
         low_cpu_mem_usage=True,
     )
     model.to(device)
-
-    valid_set = RiddleSenseDataset(eval_dataset, tokenizer, MAX_SEQUENCE_LENGTH,
-                                   is_generation=is_generation, is_exact_match=is_exact_match)
-    valid_loader = DataLoader(valid_set, batch_size=BATCH_SIZE)
-    total_entries = len(valid_set.data)
-    number_of_batches = len(valid_loader)
 
     processed_batches = 0
     if is_generation:
