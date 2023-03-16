@@ -267,14 +267,13 @@ if __name__ == '__main__':
 
                 normalised_probabilities = []
                 for i in range(0, len(answers), 5):
-                    normalised_probabilities += normalise_log_probabilities(probabilities[i:i + 5])
+                    normalised_probabilities = normalise_log_probabilities(probabilities[i:i + 5])
 
-                for sample in range(len(answers)):
-                    if labels[sample]:
-                        sum_log_probabilities += normalised_probabilities[sample]
-                        break
+                    for j in range(5):
+                        if labels[i + j]:
+                            sum_log_probabilities += normalised_probabilities[j]
 
-            result = sum_log_probabilities / total_entries
+            result = sum_log_probabilities / total_entries * 5
             print(f"Log match accuracy: {result}")
 
     else:
