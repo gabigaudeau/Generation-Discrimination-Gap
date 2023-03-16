@@ -7,6 +7,7 @@ import numpy as np
 import os
 import sys
 from torch.utils.data import Dataset
+from itertools import islice
 
 
 class RiddleSenseDataset(Dataset):
@@ -154,6 +155,11 @@ if __name__ == '__main__':
     # TODO. Do I need to do any pre-processing of the dataset?
     original_dataset = load_dataset('riddle_sense')
 
+    # Split validation set into two.
+    half = int(round(len(original_dataset["validation"]) / 2, 0))
+    valid_dataset = list(islice(original_dataset["validation"], half))
+    eval_dataset = list(islice(original_dataset["validation"], half, len(original_dataset["validation"])))
+
     tokenizer = AutoTokenizer.from_pretrained(
         MODEL_NAME,
         cache_dir=CACHE_DIR,
@@ -170,7 +176,7 @@ if __name__ == '__main__':
     )
     model.to(device)
 
-    valid_set = RiddleSenseDataset(original_dataset['validation'], tokenizer, MAX_SEQUENCE_LENGTH,
+    valid_set = RiddleSenseDataset(eval_dataset, tokenizer, MAX_SEQUENCE_LENGTH,
                                    is_generation=is_generation, is_exact_match=is_exact_match)
     valid_loader = DataLoader(valid_set, batch_size=BATCH_SIZE)
     total_entries = len(valid_set.data)
