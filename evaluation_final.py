@@ -135,7 +135,7 @@ if __name__ == '__main__':
     print(f"IS EXACT MATCH: {is_exact_match}")
     SIZE = sys.argv[3]  # 70M, 160M, 410M, 1B, 1.4B, 2.8B, 6.9B, and 12B.
     print(f"MODEL SIZE: {SIZE}")
-    BATCH_SIZE = int(sys.argv[4])  # Need to be multiple of 2 * K.
+    BATCH_SIZE = int(sys.argv[4])  # Need to be multiple of 2 (yes/no) * 5 (possible answers).
     print(f"BATCH SIZE: {BATCH_SIZE}")
 
     RANDOM_SEED = 42
