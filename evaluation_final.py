@@ -105,17 +105,17 @@ def normalise_log_probabilities(log_prob):
 
 def write_to_file(is_generation, is_exact_match, result):
     if is_generation:
-        task = "generation"
+        task = "gen"
     else:
-        task = "discrimination"
+        task = "dis"
 
     if is_exact_match:
-        accuracy = "exactmatch"
+        accuracy = "em"
     else:
-        accuracy = "logprob"
+        accuracy = "lp"
 
     # Write results
-    file = open(f"{os.path.dirname(os.path.abspath(__file__))}/results/{SIZE}_{task}_{accuracy}_batch_{BATCH_SIZE}.txt",
+    file = open(f"{os.path.dirname(os.path.abspath(__file__))}/results/{SIZE}_{task}_{accuracy}_batch_{BATCH_SIZE}_with_K{K}.txt",
                 "w")
     file.write(f"{accuracy} for {task} model {SIZE}")
     file.write("\n----------------------\n")
@@ -137,10 +137,11 @@ if __name__ == '__main__':
     print(f"MODEL SIZE: {SIZE}")
     BATCH_SIZE = int(sys.argv[4])  # Need to be multiple of 2 (yes/no) * 5 (possible answers).
     print(f"BATCH SIZE: {BATCH_SIZE}")
+    K = int(sys.argv[5])
+    print(f"K: {K}")
 
     RANDOM_SEED = 42
-    K = 5
-    DO_SAMPLE = K != 1
+    DO_SAMPLE = True
     MAX_SEQUENCE_LENGTH = 160
     REVISION = "step143000"
     MODEL_NAME = f'EleutherAI/pythia-{SIZE}-deduped'
@@ -239,7 +240,7 @@ if __name__ == '__main__':
                 input_ids = input_ids.squeeze(1).to(device)
                 with torch.inference_mode():
                     outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
-                                             do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH,
+                                             do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH + 10,
                                              use_cache=True, return_dict_in_generate=True, output_scores=True)
                 gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
                 scores = torch.stack(outputs.scores, dim=1).softmax(-1)
@@ -256,7 +257,6 @@ if __name__ == '__main__':
                     token = tokenizer.decode(input_ids[sample][token_index])
                     for k in range(K):
                         while token in answer:
-                            print(token_index)
                             log_prob += gen_probs[k][token_index].item()
                             # Won't turn into an infinite loop since we put the answer at the end ourselves.
                             token_index -= 1
@@ -319,7 +319,7 @@ if __name__ == '__main__':
 
                 with torch.inference_mode():
                     outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
-                                             do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH,
+                                             do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH + 10,
                                              use_cache=True, return_dict_in_generate=True, output_scores=True)
                 gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
                 scores = torch.stack(outputs.scores, dim=1).softmax(-1)
