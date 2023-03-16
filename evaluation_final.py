@@ -105,9 +105,9 @@ def normalise_log_probabilities(log_prob):
 
 def write_to_file(is_generation, is_exact_match, result):
     if is_generation:
-        task = "gen"
+        task = "generation"
     else:
-        task = "dis"
+        task = "discrimination"
 
     if is_exact_match:
         accuracy = "em"
@@ -115,7 +115,7 @@ def write_to_file(is_generation, is_exact_match, result):
         accuracy = "lp"
 
     # Write results
-    file = open(f"{os.path.dirname(os.path.abspath(__file__))}/results/{SIZE}_{task}_{accuracy}_batch_{BATCH_SIZE}_with_K{K}.txt",
+    file = open(f"{os.path.dirname(os.path.abspath(__file__))}/results/{SIZE}_{task}_{accuracy}_b{BATCH_SIZE}_K{K}.txt",
                 "w")
     file.write(f"{accuracy} for {task} model {SIZE}")
     file.write("\n----------------------\n")
@@ -192,7 +192,7 @@ if __name__ == '__main__':
             total_score = 0
             for input_ids, answers, labels, prompts in iter(valid_loader):
                 processed_batches += 1
-                if processed_batches % 10 == 0:
+                if processed_batches % 50 == 0:
                     print(f'Processed {processed_batches}/{number_of_batches} batches.')
 
                 input_ids = input_ids.squeeze(1).to(device)
@@ -282,7 +282,7 @@ if __name__ == '__main__':
             total_score = 0
             for input_ids, answers, labels, prompts in iter(valid_loader):
                 processed_batches += 1
-                if processed_batches % 10 == 0:
+                if processed_batches % 50 == 0:
                     print(f'Processed {processed_batches}/{number_of_batches} batches.')
 
                 input_ids = input_ids.squeeze(1).to(device)
