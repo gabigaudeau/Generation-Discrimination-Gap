@@ -247,6 +247,7 @@ if __name__ == '__main__':
                 gen_probs = torch.gather(scores, 2, gen_sequences[:, :, None]).squeeze(-1)
 
                 probabilities = []
+                index = 0
                 for sample in range(len(answers)):
                     # Deal with multi-word/long tokens.
                     # Assumption: sum the probabilities of the parts.
@@ -257,10 +258,11 @@ if __name__ == '__main__':
                     token = tokenizer.decode(input_ids[sample][token_index])
                     for k in range(K):
                         while token in answer:
-                            log_prob += gen_probs[k][token_index].item()
+                            log_prob += gen_probs[index][token_index].item()
                             # Won't turn into an infinite loop since we put the answer at the end ourselves.
                             token_index -= 1
                             token = tokenizer.decode(input_ids[sample][token_index])
+                        index += 1
                     probabilities.append(log_prob / K)
 
                 normalised_probabilities = []
@@ -326,25 +328,24 @@ if __name__ == '__main__':
                 gen_probs = torch.gather(scores, 2, gen_sequences[:, :, None]).squeeze(-1)
 
                 probabilities = []
+                index = 0
                 for sample in range(len(answers)):
                     log_prob = 0
                     # The answer yes/no is always the last token and won't be split.
                     token_index = len(input_ids[sample]) - 1
                     for k in range(K):
-                        log_prob += gen_probs[k][token_index].item()
+                        log_prob += gen_probs[index][token_index].item()
+                        index += 1
                     probabilities.append(log_prob / K)
 
-                normalised_probabilities = []
                 for i in range(0, len(answers), 2):
-                    normalised_probabilities += normalise_log_probabilities(probabilities[i:i + 2])
-
-                for sample in range(0, len(answers), 2):
-                    if labels[sample]:
-                        sum_log_probabilities += normalised_probabilities[sample]
+                    normalised_probabilities = normalise_log_probabilities(probabilities[i:i + 2])
+                    if labels[i]:
+                        sum_log_probabilities += normalised_probabilities[0]
                     else:
-                        sum_log_probabilities += normalised_probabilities[sample + 1]
+                        sum_log_probabilities += normalised_probabilities[1]
 
-            result = sum_log_probabilities / total_entries
+            result = sum_log_probabilities / total_entries * 2
             print(f"Log match accuracy: {result}")
 
     write_to_file(is_generation, is_exact_match, result)
