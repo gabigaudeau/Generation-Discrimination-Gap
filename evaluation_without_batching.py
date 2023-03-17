@@ -1,17 +1,84 @@
-from transformers import GPTNeoXForCausalLM, AutoTokenizer
+from datasets import load_dataset
+import random
+from transformers import GPTNeoXForCausalLM, AutoTokenizer, set_seed
+from torch.utils.data import DataLoader
 import torch
 import numpy as np
-import random
+import os
+import sys
+from torch.utils.data import Dataset
+from itertools import islice
 
-from RiddleDataset_without_batching import RiddleSenseDataset
 
-# Fields.
-SEED = 42
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-DISCRIMINATION_PROMPT = "Q: [QUESTION]\nA: [ANSWER]\nIs this a correct answer to the riddle?\n[OUTPUT]"
-GENERATION_PROMPT = "Q: [QUESTION]\nThe answer to the riddle is: [ANSWER]"
-K = 5  # Sample size.
-do_sample = K != 1
+class RiddleSenseDataset(Dataset):
+    DISCRIMINATION_PROMPT = "[QUESTION]\nIs [ANSWER] a correct answer to the riddle?\n[OUTPUT]"
+    GENERATION_PROMPT = "[QUESTION]\nThe answer to the riddle is: [ANSWER]"
+
+    def __init__(self, data, tokenizer, max_len, is_generation, is_exact_match):
+        self.data = []
+        for entry in data:
+            question = entry['question']
+            for i in range(len(entry['choices']['text'])):
+                label = entry['choices']['label'][i]
+                answer = entry['choices']['text'][i]
+                if not is_generation and not is_exact_match:
+                    self.data.append(DataEntry(question, answer, label == entry['answerKey'], 'yes'))
+                    self.data.append(DataEntry(question, answer, label == entry['answerKey'], 'no'))
+                else:
+                    self.data.append(DataEntry(question, answer, label == entry['answerKey']))
+
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+        self.is_generation = is_generation
+        self.is_exact_match = is_exact_match
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, index):
+        entry = self.data[index]
+
+        if self.is_generation:
+            prompt = self.GENERATION_PROMPT
+            if self.is_exact_match:
+                prompt = prompt.replace('[ANSWER]', "")
+            else:
+                prompt = prompt.replace('[ANSWER]', entry.answer)
+        else:
+            prompt = self.DISCRIMINATION_PROMPT
+            prompt = prompt.replace('[ANSWER]', entry.answer)
+
+        prompt = prompt.replace('[QUESTION]', entry.question)
+
+        # Will only do so when an output is provided.
+        self.prompt = prompt.replace('[OUTPUT]', entry.output)
+
+        input_ids = self.tokenizer(self.prompt, return_tensors="pt", truncation=True, padding='max_length',
+                                   max_length=self.max_len).input_ids
+
+        if entry.output == "":
+            return input_ids, entry.answer, entry.is_correct, self.prompt
+        else:
+            return input_ids, entry.output, entry.is_correct, self.prompt
+
+
+class DataEntry:
+    """
+    Input entry in the format, for e.g.,
+    'answerKey': 'E',
+    'question': 'A man is incarcerated in prison, and as his punishment he has to carry a one tonne bag of sand
+    backwards and forwards across a field the size of a football pitch. What is the one thing he can put in it to
+    make it lighter?',
+    'choices':
+            'label': ['A', 'B', 'C', 'D', 'E'],
+            'text': ['throw', 'bit', 'gallon', 'mouse', 'hole']
+    """
+
+    def __init__(self, question, answer, is_correct, output=""):
+        self.question = question.strip()
+        self.answer = answer.strip()
+        self.is_correct = is_correct
+        self.output = output
 
 
 def get_first_new_token(output, prompt):
@@ -23,99 +90,10 @@ def get_first_new_token(output, prompt):
     while index < len(split_output):
         token = split_output[index]
         if token != "" and token is not None:
-            return token
+            return token, index
         index += 1
 
-    return None
-
-
-def get_exact_match_prompt(answer, question, is_discrimination=False):
-    if is_discrimination:
-        return DISCRIMINATION_PROMPT \
-            .replace('[QUESTION]', question) \
-            .replace('[ANSWER]', answer) \
-            .replace('[OUTPUT]', "")
-    else:
-        return GENERATION_PROMPT \
-            .replace('[QUESTION]', question) \
-            .replace('[ANSWER]', "")
-
-
-def get_exact_match_accuracy(model, tokenizer, dataset, is_discrimination=False):
-    correct_outputs = 0
-    total_outputs = 0
-
-    for entry in dataset.entries['validation']:
-        question = entry.question
-
-        for label in entry.choices.keys():
-            total_outputs += 1
-            if total_outputs % 100 == 0:
-                print(f'Processed {total_outputs} data entries.')
-
-            answer = entry.choices[label]
-            prompt = get_exact_match_prompt(question, answer, is_discrimination)
-
-            inputs = tokenizer(prompt, return_tensors="pt")
-            tokens = model.generate(**inputs, max_length=160, pad_token_id=tokenizer.eos_token_id,
-                                    num_return_sequences=K, do_sample=do_sample)
-
-            for k in range(K):
-                token = get_first_new_token(tokenizer.decode(tokens[k]), prompt)
-                if token is not None:
-                    if is_discrimination:
-                        # TODO. Should anything else than 'yes' be considered to be a 'no'?
-                        if ('yes' == token.lower() and label == entry.answer_key) or \
-                                ('no' == token.lower() and not label == entry.answer_key):
-                            correct_outputs += 1
-                    else:
-                        # Generation.
-                        # For multi-word expressions, we consider that if the output contains part of the answer,
-                        # it is correct.
-                        if token.lower() in answer:
-                            correct_outputs += 1
-
-    return correct_outputs / (total_outputs * K)
-
-
-def get_log_prompt(answer, question, output=None, is_discrimination=False):
-    if is_discrimination:
-        return DISCRIMINATION_PROMPT \
-            .replace('[QUESTION]', question) \
-            .replace('[ANSWER]', answer) \
-            .replace('[OUTPUT]', output)
-    else:
-        return GENERATION_PROMPT \
-            .replace('[QUESTION]', question) \
-            .replace('[ANSWER]', answer)
-
-
-def get_log_probabilities(model, input_ids, tokenizer):
-    outputs = model.generate(input_ids, max_length=160, pad_token_id=tokenizer.eos_token_id,
-                             return_dict_in_generate=True, output_scores=True,
-                             num_return_sequences=K, do_sample=do_sample)
-
-    gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
-    probs = torch.stack(outputs.scores, dim=1).softmax(-1)
-    return torch.gather(probs, 2, gen_sequences[:, :, None]).squeeze(-1)
-
-
-def get_token_probability(answer, input_ids, gen_probs, tokenizer):
-    # Deal with multi-word/long tokens.
-    # Assumption: sum the probabilities of the parts.
-    # https://stackoverflow.com/questions/59435020/get-probability-of-multi-token-word-in-mask-position
-
-    log_prob = 0
-    for k in range(K):
-        for token, p in zip(input_ids[0], gen_probs[k]):
-            if token not in tokenizer.all_special_ids:
-                # Deal with multi-word/long tokens.
-                # Assumption: sum the probabilities of the parts.
-                # https://stackoverflow.com/questions/59435020/get-probability-of-multi-token-word-in-mask-position
-                if tokenizer.decode(token) in answer:
-                    log_prob += p.item()
-
-    return log_prob
+    return None, None
 
 
 def normalise_log_probabilities(log_prob):
@@ -125,63 +103,108 @@ def normalise_log_probabilities(log_prob):
     return [p / sum(prob) for p in prob]
 
 
+def write_to_file(is_generation, is_exact_match, result):
+    if is_generation:
+        task = "generation"
+    else:
+        task = "discrimination"
+
+    if is_exact_match:
+        accuracy = "em"
+    else:
+        accuracy = "lp"
+
+    # Write results
+    file = open(f"{os.path.dirname(os.path.abspath(__file__))}/results/{SIZE}_{task}_{accuracy}_b{BATCH_SIZE}_K{K}.txt",
+                "w")
+    file.write(f"{accuracy} for {task} model {SIZE}")
+    file.write("\n----------------------\n")
+    file.write(f"{result}  | ")
+    file.write("\n----------------------\n\n")
+
+    file.close()
+
+
 def get_generation_log_accuracy(model, tokenizer, dataset):
-    sum_log_probabilities = 0
-    total_outputs = 0
+    def get_discrimination_log_accuracy(model, tokenizer, dataset):
+        total_outputs = 0
+        sum_log_probabilities = 0
 
-    for entry in dataset.entries['validation']:
-        total_outputs += 1
-        if total_outputs % 100 == 0:
-            print(f'Processed {total_outputs} data entries.')
-
-        question = entry.question
-        probabilities = []
-        labels = []
-
-        for label in entry.choices.keys():
-            answer = entry.choices[label]
-            prompt = get_log_prompt(answer, question)
-
-            input_ids = tokenizer(prompt, return_tensors="pt").input_ids
-            gen_probs = get_log_probabilities(model, input_ids, tokenizer)
-            log_prob = get_token_probability(answer, input_ids, gen_probs, tokenizer)
-            probabilities.append(log_prob / K)
-            labels.append(label)
-
-        normalised_probabilities = normalise_log_probabilities(probabilities)
-        for i in range(len(labels)):
-            if labels[i] == entry.answer_key:
-                sum_log_probabilities += normalised_probabilities[i]
-                break
-
-    return sum_log_probabilities / total_outputs
-
-
-def get_discrimination_log_accuracy(model, tokenizer, dataset):
-    sum_log_probabilities = 0
-    total_outputs = 0
-
-    for entry in dataset.entries['validation']:
-        question = entry.question
-
-        for label in entry.choices.keys():
+        for i in range(0, len(dataset), 5):
             total_outputs += 1
             if total_outputs % 100 == 0:
                 print(f'Processed {total_outputs} data entries.')
 
-            answer = entry.choices[label]
+                # for "yes"
+                input_ids_yes, answer_yes, label_yes, _ = dataset[i]
+                # for "no"
+                input_ids_no, answer_no, label_no, _ = dataset[i + 1]
+
+                input_ids = input_ids_yes + input_ids_no
+                answers = answer_yes + answer_no
+                labels = label_yes + label_no
+
+                with torch.inference_mode():
+                    outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
+                                             do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH + 10,
+                                             use_cache=True, return_dict_in_generate=True, output_scores=True)
+                    gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
+                    scores = torch.stack(outputs.scores, dim=1).softmax(-1)
+                    gen_probs = torch.gather(scores, 2, gen_sequences[:, :, None]).squeeze(-1)
+
+                probabilities = []
+                for i in range(len(answers)):
+                    log_prob = 0
+                    # The answer yes/no is always the last token and won't be split.
+                    token_index = len(input_ids[i]) - 1
+                    log_prob += gen_probs[i][token_index].item()
+                    probabilities.append(log_prob)
+
+                normalised_probabilities = normalise_log_probabilities(probabilities)
+                if labels[i]:
+                    sum_log_probabilities += normalised_probabilities[0]
+                else:
+                    sum_log_probabilities += normalised_probabilities[1]
+
+        return sum_log_probabilities / total_outputs
+
+
+def get_discrimination_log_accuracy(model, tokenizer, dataset):
+    total_outputs = 0
+    sum_log_probabilities = 0
+
+    for i in range(0, len(dataset), 2):
+        total_outputs += 1
+        if total_outputs % 100 == 0:
+            print(f'Processed {total_outputs} data entries.')
+
+            # for "yes"
+            input_ids_yes, answer_yes, label_yes, _ = dataset[i]
+            # for "no"
+            input_ids_no, answer_no, label_no, _ = dataset[i+1]
+
+            input_ids = input_ids_yes + input_ids_no
+            answers = answer_yes + answer_no
+            labels = label_yes + label_no
+
+            with torch.inference_mode():
+                outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
+                                         do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH + 10,
+                                         use_cache=True, return_dict_in_generate=True, output_scores=True)
+                gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
+                scores = torch.stack(outputs.scores, dim=1).softmax(-1)
+                gen_probs = torch.gather(scores, 2, gen_sequences[:, :, None]).squeeze(-1)
+
             probabilities = []
-
-            for output in ["Yes", "No"]:
-                prompt = get_log_prompt(answer, question, output, is_discrimination=True)
-
-                input_ids = tokenizer(prompt, padding=True, return_tensors="pt").input_ids
-                gen_probs = get_log_probabilities(model, input_ids, tokenizer)
-                log_prob = get_token_probability(answer, input_ids, gen_probs, tokenizer)
-                probabilities.append(log_prob / K)
+            for i in range(len(answers)):
+                log_prob = 0
+                # The answer yes/no is always the last token and won't be split.
+                token_index = len(input_ids[i]) - 1
+                log_prob += gen_probs[i][token_index].item()
+                probabilities.append(log_prob)
 
             normalised_probabilities = normalise_log_probabilities(probabilities)
-            if label == entry.answer_key:
+            if labels[i]:
                 sum_log_probabilities += normalised_probabilities[0]
             else:
                 sum_log_probabilities += normalised_probabilities[1]
@@ -189,71 +212,81 @@ def get_discrimination_log_accuracy(model, tokenizer, dataset):
     return sum_log_probabilities / total_outputs
 
 
-
 if __name__ == '__main__':
+    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    print(f"Using: {device}\n")
+
+    is_generation = sys.argv[1] == '0'
+    print(f"IS GENERATION: {is_generation}")
+    is_exact_match = sys.argv[2] == '0'
+    print(f"IS EXACT MATCH: {is_exact_match}")
+    SIZE = sys.argv[3]  # 70M, 160M, 410M, 1B, 1.4B, 2.8B, 6.9B, and 12B.
+    print(f"MODEL SIZE: {SIZE}")
+    BATCH_SIZE = int(sys.argv[4])  # Need to be multiple of 2 (yes/no) * 5 (possible answers).
+    print(f"BATCH SIZE: {BATCH_SIZE}")
+    K = int(sys.argv[5])
+    print(f"K: {K}")
+
+    RANDOM_SEED = 42
+    DO_SAMPLE = True
+    MAX_SEQUENCE_LENGTH = 160
+    REVISION = "step143000"
+    MODEL_NAME = f'EleutherAI/pythia-{SIZE}-deduped'
+    CACHE_DIR = f'{os.path.dirname(os.path.abspath(__file__))}/pythia-{SIZE}-deduped/{REVISION}'
+
     # Setting the random seed.
-    random.seed(SEED)
+    random.seed(RANDOM_SEED)
+    torch.manual_seed(RANDOM_SEED)
+    set_seed(RANDOM_SEED)
 
-    print("---- PREPARING DATASET ----\n")
-    # TODO. Do I need to do any pre-processing of the dataset?
-    dataset = RiddleSenseDataset()
+    print("\n---- PREPARING DATASET ----")
+    original_dataset = load_dataset('riddle_sense')
 
-    print("\n---- GENERATION ----")
-    SIZE = '70m'
-    MODEL_NAME = f'EleutherAI/pythia-{SIZE}-deduped'
-    REVISION = 'step3000'
-    CACHE_DIR = f'./pythia-{SIZE}-deduped/step3000'
+    # Split validation set into two.
+    half = int(round(len(original_dataset["validation"]) / 2, 0))
+    valid_dataset = list(islice(original_dataset["validation"], half))
+    eval_dataset = list(islice(original_dataset["validation"], half, len(original_dataset["validation"])))
 
     tokenizer = AutoTokenizer.from_pretrained(
         MODEL_NAME,
-        revision=REVISION,
         cache_dir=CACHE_DIR,
     )
 
     tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = 'left'
 
-    # Vary model sizes:
-    # 70M, 160M, 410M, 1B, 1.4B, 2.8B, 6.9B, and 12B.
+    # A few pre-processing steps.
+    # Do I split it?
+    valid_set = RiddleSenseDataset(eval_dataset, tokenizer, MAX_SEQUENCE_LENGTH,
+                                   is_generation=is_generation, is_exact_match=is_exact_match)
+
+    print("\n---- DOWNLOADING MODEL ----")
     model = GPTNeoXForCausalLM.from_pretrained(
         MODEL_NAME,
-        revision=REVISION,
-        cache_dir=CACHE_DIR
-    )
-
-    print(f"\nGeneration: Exact match accuracy for {MODEL_NAME}")
-    g_acc = get_exact_match_accuracy(model, tokenizer, dataset)
-    print(g_acc)
-
-    print(f"\nGeneration: Log probability accuracy for {MODEL_NAME}")
-    g_log_acc = get_generation_log_accuracy(model, tokenizer, dataset)
-    print(g_log_acc)
-
-    print("\n---- DISCRIMINATION ----")
-    SIZE = '70m'
-    MODEL_NAME = f'EleutherAI/pythia-{SIZE}-deduped'
-    REVISION = 'step3000'
-    CACHE_DIR = f'./pythia-{SIZE}-deduped/step3000'
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        MODEL_NAME,
-        revision=REVISION,
         cache_dir=CACHE_DIR,
+        torch_dtype=torch.float16,
+        low_cpu_mem_usage=True,
     )
+    model.to(device)
 
-    tokenizer.pad_token = tokenizer.eos_token
+    if is_generation:
+        print(f"\n---- GENERATION for {SIZE}----\n")
 
-    # Vary model sizes:
-    # 70M, 160M, 410M, 1B, 1.4B, 2.8B, 6.9B, and 12B.
-    model = GPTNeoXForCausalLM.from_pretrained(
-        MODEL_NAME,
-        revision=REVISION,
-        cache_dir=CACHE_DIR
-    )
+        if is_exact_match:
+            result = 0
+            print(f"Exact match accuracy: {result}")
+        else:
+            result = 0
+            print(f"Log match accuracy: {result}")
+    else:
+        print(f"\n---- DISCRIMINATION for {SIZE}----\n")
 
-    print(f"\nDiscrimination: Exact match accuracy for {MODEL_NAME}")
-    d_acc = get_exact_match_accuracy(model, tokenizer, dataset)
-    print(d_acc)
+        if is_exact_match:
+            result = 0
+            print(f"Exact match accuracy: {result}")
+        else:
+            result = get_discrimination_log_accuracy(model, tokenizer, valid_dataset)
+            print(f"Log match accuracy: {result}")
 
-    print(f"\nDiscrimination: Log probability accuracy for {MODEL_NAME}")
-    d_log_acc = get_discrimination_log_accuracy(model, tokenizer, dataset)
-    print(d_log_acc)
+
+
