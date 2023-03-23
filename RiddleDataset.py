@@ -1,4 +1,5 @@
 from torch.utils.data import Dataset
+import torch
 
 
 class RiddleSenseDataset(Dataset):
@@ -68,3 +69,61 @@ class DataEntry:
         self.answer = answer
         self.is_correct = is_correct
         self.output = output
+
+
+class GenerationDataset(Dataset):
+    def __init__(self, dataset, split, tokenizer, max_len):
+        self.data = []
+        self.labels = []
+
+        for entry in dataset[split]:
+            question = entry['question']
+
+            if split != 'test':
+                for i in range(len(entry['choices']['text'])):
+                    label = entry['choices']['label'][i]
+                    answer = entry['choices']['text'][i]
+
+                    if label == entry['answerKey']:
+                        self.data.append(question + " " + answer)
+            else:
+                self.data.append(question)
+
+        self.max_len = max_len
+        self.encodings = tokenizer(self.data, return_tensors="pt", truncation=True, padding='max_length',
+                                   max_length=self.max_len)
+        
+    def __getitem__(self, idx):
+        return {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
+
+    def __len__(self):
+        return len(self.encodings)
+
+
+class DiscriminationDataset(Dataset):
+    def __init__(self, dataset, split, tokenizer, max_len):
+        self.data = []
+        self.labels = []
+
+        for entry in dataset[split]:
+            question = entry['question']
+
+            if split != 'test':
+                for i in range(len(entry['choices']['text'])):
+                    label = entry['choices']['label'][i]
+                    answer = entry['choices']['text'][i]
+
+                    if label == entry['answerKey']:
+                        self.data.append(question + " " + answer)
+            else:
+                self.data.append(question)
+
+        self.max_len = max_len
+        self.encodings = tokenizer(self.data, return_tensors="pt", truncation=True, padding='max_length',
+                                   max_length=self.max_len)
+
+    def __getitem__(self, idx):
+        return {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
+
+    def __len__(self):
+        return len(self.encodings)

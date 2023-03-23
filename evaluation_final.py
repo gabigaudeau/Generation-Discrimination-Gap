@@ -8,11 +8,12 @@ import os
 import sys
 from torch.utils.data import Dataset
 from itertools import islice
+import re
 
 
 class RiddleSenseDataset(Dataset):
-    DISCRIMINATION_PROMPT = "[QUESTION]\nIs [ANSWER] a correct answer to the riddle?\n[OUTPUT]"
-    GENERATION_PROMPT = "[QUESTION]\nThe answer to the riddle is: [ANSWER]"
+    DISCRIMINATION_PROMPT = "[QUESTION] Is \"[ANSWER]\" a correct answer to the riddle? Yes or no? [OUTPUT]"
+    GENERATION_PROMPT = "[QUESTION] The answer to the riddle is: [ANSWER]"
 
     def __init__(self, data, tokenizer, max_len, is_generation, is_exact_match):
         self.data = []
@@ -89,18 +90,18 @@ def get_first_new_token(output, prompt):
     index = len(split_prompt)
     while index < len(split_output):
         token = split_output[index]
-        if token != "" and token is not None:
+        token = re.sub(r"[^\w\s]", '', token)
+        if token != "" and token is not None and token != " " and token.lower() != "a" and token.lower() != 'the' \
+                and token.lower() != "an":
             return token, index
         index += 1
 
     return None, None
 
-
-def normalise_log_probabilities(log_prob):
-    # Convert to non-log probabilities.
-    prob = np.exp(np.array(log_prob))
-    # Normalise the probabilities.
-    return [p / sum(prob) for p in prob]
+def softmax(x):
+    """Compute softmax values for each sets of scores in x."""
+    e_x = np.exp(x - np.max(x))
+    return e_x / sum(e_x) .sum(axis=0)  # only difference
 
 
 def write_to_file(is_generation, is_exact_match, result):
@@ -123,6 +124,178 @@ def write_to_file(is_generation, is_exact_match, result):
     file.write("\n----------------------\n\n")
 
     file.close()
+
+def get_exact_match_for_generation(loader, model, tokenizer):
+    processed_batches = 0
+    total_score = 0
+    for input_ids, answers, labels, prompts in iter(loader):
+        processed_batches += 1
+        if processed_batches % 50 == 0:
+            print(f'Processed {processed_batches}/{number_of_batches} batches.')
+
+        input_ids = input_ids.squeeze(1).to(device)
+
+        with torch.inference_mode():
+            outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
+                                     do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH + 10,
+                                     use_cache=True, temperature=0.5)
+        tokens = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+        index = 0
+        for sample in range(len(answers)):
+            sample_score = 0
+            for k in range(K):
+                token, token_index = get_first_new_token(tokens[index], prompts[sample])
+                if token is not None:
+                    token = re.sub(r"[^\w\s]", '', token)
+                    answer_split = answers[sample].split(" ")
+
+                    idx = 0
+                    while idx < len(answer_split):
+                        if token.lower() == answer_split[idx]:
+                            idx += 1
+                            token_index += 1
+                            if token_index < len(tokens[k]):
+                                token = tokens[k][token_index]
+                                token = re.sub(r'[^\w\s]', '', token)
+                            else:
+                                break
+                        else:
+                            break
+
+                    if idx == len(answer_split):
+                        sample_score += 1
+                index += 1
+            total_score += sample_score / K
+
+    result = total_score / total_entries
+    print(f"Exact match accuracy: {result}")
+    return result
+
+
+def get_exact_match_for_discrimination(loader, model, tokenizer):
+    processed_batches = 0
+    total_score = 0
+    for input_ids, answers, labels, prompts in iter(loader):
+        processed_batches += 1
+        if processed_batches % 50 == 0:
+            print(f'Processed {processed_batches}/{number_of_batches} batches.')
+
+        input_ids = input_ids.squeeze(1).to(device)
+
+        with torch.inference_mode():
+            outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
+                                     do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH + 10,
+                                     use_cache=True, temperature=0.5)
+        tokens = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+        index = 0
+        for sample in range(len(answers)):
+            sample_score = 0
+            for k in range(K):
+                token, _ = get_first_new_token(tokens[index], prompts[sample])
+                if token is not None:
+                    token = re.sub(r'[^\w\s]', '', token)
+                    if (token.lower() == 'yes' and labels[sample]) or \
+                            (token.lower() == 'no' and not labels[sample]):
+                        sample_score += 1
+                index += 1
+            total_score += sample_score / K
+
+    result = total_score / total_entries
+    print(f"Exact match accuracy: {result}")
+    return result
+
+
+def get_logprob_for_generation(loader, model, tokenizer):
+    processed_batches = 0
+    sum_log_probabilities = 0
+    for input_ids, answers, labels, prompts in iter(loader):
+        processed_batches += 1
+        if processed_batches % 50 == 0:
+            print(f'Processed {processed_batches}/{number_of_batches} batches.')
+
+        input_ids = input_ids.squeeze(1).to(device)
+        with torch.inference_mode():
+            outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
+                                     do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH + 10,
+                                     use_cache=True, return_dict_in_generate=True, output_scores=True,
+                                     temperature=0.5)
+        gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
+        scores = torch.stack(outputs.scores, dim=1)
+        gen_probs = torch.gather(scores, 2, gen_sequences[:, :, None]).squeeze(-1)
+
+        probabilities = []
+        index = 0
+        for sample in range(len(answers)):
+            # Deal with multi-word/long tokens.
+            # Assumption: sum the probabilities of the parts.
+            # https://stackoverflow.com/questions/59435020/get-probability-of-multi-token-word-in-mask-position
+            answer = answers[sample]
+            log_prob = 0
+            token_index = len(input_ids[sample]) - 1
+            token = tokenizer.decode(input_ids[sample][token_index])
+            for k in range(K):
+                while token in answer:
+                    log_prob += gen_probs[index][token_index].item()
+                    # Won't turn into an infinite loop since we put the answer at the end ourselves.
+                    token_index -= 1
+                    token = tokenizer.decode(input_ids[sample][token_index])
+                index += 1
+            probabilities.append(log_prob / K)
+
+        for i in range(0, len(answers), 5):
+            normalised_probabilities = softmax(probabilities[i:i + 5])
+
+            for j in range(5):
+                if labels[i + j]:
+                    sum_log_probabilities += normalised_probabilities[j]
+
+    result = 5 * sum_log_probabilities / total_entries
+    print(f"Log match accuracy: {result}")
+    return result
+
+
+def get_logprob_for_discrimination(loader, model, tokenizer):
+    processed_batches = 0
+    sum_log_probabilities = 0
+    for input_ids, answers, labels, prompts in iter(loader):
+        processed_batches += 1
+        if processed_batches % 50 == 0:
+            print(f'Processed {processed_batches}/{number_of_batches} batches.')
+
+        input_ids = input_ids.squeeze(1).to(device)
+
+        with torch.inference_mode():
+            outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
+                                     do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH + 10,
+                                     temperature=0.5, return_dict_in_generate=True, output_scores=True,
+                                     use_cache=True, )
+        gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
+        scores = torch.stack(outputs.scores, dim=1)
+        gen_probs = torch.gather(scores, 2, gen_sequences[:, :, None]).squeeze(-1)
+
+        probabilities = []
+        index = 0
+        for sample in range(len(answers)):
+            log_prob = 0
+            # The answer yes/no is always the last token and won't be split.
+            token_index = len(input_ids[sample]) - 1
+            for k in range(K):
+                log_prob += gen_probs[index][token_index].item()
+                index += 1
+            probabilities.append(log_prob / K)
+
+        for i in range(0, len(answers), 2):
+            normalised_probabilities = softmax(probabilities[i:i + 2])
+            if labels[i]:
+                sum_log_probabilities += normalised_probabilities[0]
+            else:
+                sum_log_probabilities += normalised_probabilities[1]
+
+    result = 2 * sum_log_probabilities / total_entries
+    print(f"Log match accuracy: {result}")
+    return result
 
 
 if __name__ == '__main__':
@@ -155,11 +328,6 @@ if __name__ == '__main__':
     print("\n---- PREPARING DATASET ----")
     original_dataset = load_dataset('riddle_sense')
 
-    # Split validation set into two.
-    half = int(round(len(original_dataset["validation"]) / 2, 0))
-    valid_dataset = list(islice(original_dataset["validation"], half))
-    eval_dataset = list(islice(original_dataset["validation"], half, len(original_dataset["validation"])))
-
     tokenizer = AutoTokenizer.from_pretrained(
         MODEL_NAME,
         cache_dir=CACHE_DIR,
@@ -169,11 +337,12 @@ if __name__ == '__main__':
     tokenizer.padding_side = 'left'
 
     # A few pre-processing steps.
-    valid_set = RiddleSenseDataset(eval_dataset, tokenizer, MAX_SEQUENCE_LENGTH,
-                                   is_generation=is_generation, is_exact_match=is_exact_match)
-    valid_loader = DataLoader(valid_set, batch_size=BATCH_SIZE)
-    total_entries = len(valid_set.data)
-    number_of_batches = len(valid_loader)
+    eval_set = RiddleSenseDataset(original_dataset["validation"], tokenizer, MAX_SEQUENCE_LENGTH,
+                                  is_generation=is_generation, is_exact_match=is_exact_match)
+    eval_loader = DataLoader(eval_set, batch_size=BATCH_SIZE)
+
+    total_entries = len(eval_set.data)
+    number_of_batches = len(eval_loader)
 
     print("\n---- DOWNLOADING MODEL ----")
     model = GPTNeoXForCausalLM.from_pretrained(
@@ -184,167 +353,21 @@ if __name__ == '__main__':
     )
     model.to(device)
 
-    processed_batches = 0
     if is_generation:
         print(f"\n---- GENERATION for {SIZE}----\n")
 
         if is_exact_match:
-            total_score = 0
-            for input_ids, answers, labels, prompts in iter(valid_loader):
-                processed_batches += 1
-                if processed_batches % 50 == 0:
-                    print(f'Processed {processed_batches}/{number_of_batches} batches.')
-
-                input_ids = input_ids.squeeze(1).to(device)
-
-                with torch.inference_mode():
-                    outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
-                                             do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH + 10,
-                                             use_cache=True)
-                tokens = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-
-                index = 0
-                for sample in range(len(answers)):
-                    sample_score = 0
-                    for k in range(K):
-                        token, token_index = get_first_new_token(tokens[index], prompts[sample])
-                        if token is not None:
-                            answer_split = answers[sample].split(" ")
-
-                            idx = 0
-                            while idx < len(answer_split):
-                                if token.lower() == answer_split[idx]:
-                                    idx += 1
-                                    token_index += 1
-                                    if token_index < len(tokens[index]):
-                                        token = tokens[index][token_index]
-                                    else:
-                                        break
-                                else:
-                                    break
-
-                            if idx == len(answer_split):
-                                sample_score += 1
-                        index += 1
-                    total_score += sample_score / K
-
-            result = total_score / total_entries
-            print(f"Exact match accuracy: {result}")
+            result = get_exact_match_for_generation(eval_loader, model, tokenizer)
         else:
-            sum_log_probabilities = 0
-            for input_ids, answers, labels, prompts in iter(valid_loader):
-                processed_batches += 1
-                if processed_batches % 50 == 0:
-                    print(f'Processed {processed_batches}/{number_of_batches} batches.')
-
-                input_ids = input_ids.squeeze(1).to(device)
-                with torch.inference_mode():
-                    outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
-                                             do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH + 10,
-                                             use_cache=True, return_dict_in_generate=True, output_scores=True)
-                gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
-                scores = torch.stack(outputs.scores, dim=1).softmax(-1)
-                gen_probs = torch.gather(scores, 2, gen_sequences[:, :, None]).squeeze(-1)
-
-                probabilities = []
-                index = 0
-                for sample in range(len(answers)):
-                    # Deal with multi-word/long tokens.
-                    # Assumption: sum the probabilities of the parts.
-                    # https://stackoverflow.com/questions/59435020/get-probability-of-multi-token-word-in-mask-position
-                    answer = answers[sample]
-                    log_prob = 0
-                    token_index = len(input_ids[sample]) - 1
-                    token = tokenizer.decode(input_ids[sample][token_index])
-                    for k in range(K):
-                        while token in answer:
-                            log_prob += gen_probs[index][token_index].item()
-                            # Won't turn into an infinite loop since we put the answer at the end ourselves.
-                            token_index -= 1
-                            token = tokenizer.decode(input_ids[sample][token_index])
-                        index += 1
-                    probabilities.append(log_prob / K)
-
-                normalised_probabilities = []
-                for i in range(0, len(answers), 5):
-                    normalised_probabilities = normalise_log_probabilities(probabilities[i:i + 5])
-
-                    for j in range(5):
-                        if labels[i + j]:
-                            sum_log_probabilities += normalised_probabilities[j]
-
-            result = sum_log_probabilities / total_entries * 5
-            print(f"Log match accuracy: {result}")
+            result = get_logprob_for_generation(eval_loader, model, tokenizer)
 
     else:
         print(f"\n---- DISCRIMINATION for {SIZE}----\n")
 
         if is_exact_match:
-            total_score = 0
-            for input_ids, answers, labels, prompts in iter(valid_loader):
-                processed_batches += 1
-                if processed_batches % 50 == 0:
-                    print(f'Processed {processed_batches}/{number_of_batches} batches.')
-
-                input_ids = input_ids.squeeze(1).to(device)
-
-                with torch.inference_mode():
-                    outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
-                                             do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH + 10,
-                                             use_cache=True)
-                tokens = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-
-                index = 0
-                for sample in range(len(answers)):
-                    sample_score = 0
-                    for k in range(K):
-                        token, _ = get_first_new_token(tokens[index], prompts[sample])
-                        if token is not None:
-                            if (token.lower() == 'yes' and labels[sample]) or \
-                                    (token.lower() == 'no' and not labels[sample]):
-                                sample_score += 1
-                        index += 1
-                    total_score += sample_score / K
-
-            result = total_score / total_entries
-            print(f"Exact match accuracy: {result}")
+            result = get_exact_match_for_discrimination(eval_loader, model, tokenizer)
 
         else:
-            sum_log_probabilities = 0
-            for input_ids, answers, labels, prompts in iter(valid_loader):
-                processed_batches += 1
-                if processed_batches % 50 == 0:
-                    print(f'Processed {processed_batches}/{number_of_batches} batches.')
-
-                input_ids = input_ids.squeeze(1).to(device)
-
-                with torch.inference_mode():
-                    outputs = model.generate(input_ids, pad_token_id=tokenizer.eos_token_id, num_return_sequences=K,
-                                             do_sample=DO_SAMPLE, max_new_tokens=MAX_SEQUENCE_LENGTH + 10,
-                                             use_cache=True, return_dict_in_generate=True, output_scores=True)
-                gen_sequences = outputs.sequences[:, input_ids.shape[-1]:]
-                scores = torch.stack(outputs.scores, dim=1).softmax(-1)
-                gen_probs = torch.gather(scores, 2, gen_sequences[:, :, None]).squeeze(-1)
-
-                probabilities = []
-                index = 0
-                for sample in range(len(answers)):
-                    log_prob = 0
-                    # The answer yes/no is always the last token and won't be split.
-                    token_index = len(input_ids[sample]) - 1
-                    for k in range(K):
-                        log_prob += gen_probs[index][token_index].item()
-                        index += 1
-                    probabilities.append(log_prob / K)
-
-                for i in range(0, len(answers), 2):
-                    normalised_probabilities = normalise_log_probabilities(probabilities[i:i + 2])
-                    if labels[i]:
-                        sum_log_probabilities += normalised_probabilities[0]
-                    else:
-                        sum_log_probabilities += normalised_probabilities[1]
-
-            result = sum_log_probabilities / total_entries * 2
-            print(f"Log match accuracy: {result}")
+            result = get_logprob_for_discrimination(eval_loader, model, tokenizer)
 
     write_to_file(is_generation, is_exact_match, result)
