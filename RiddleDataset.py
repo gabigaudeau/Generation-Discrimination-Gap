@@ -3,10 +3,14 @@ import torch
 
 
 class RiddleSenseDataset(Dataset):
-    DISCRIMINATION_PROMPT = "Q: [QUESTION]\nA: [ANSWER]\nIs this a correct answer to the riddle?\n[OUTPUT]"
-    GENERATION_PROMPT = "Q: [QUESTION]\nThe answer to the riddle is: [ANSWER]"
+    """
+    Dataset for RiddleSense.
+    """
 
-    def __init__(self, data, tokenizer, max_len, is_generation, is_exact_match):
+    DISCRIMINATION_PROMPT = "[QUESTION] Is \"[ANSWER]\" a correct answer to the riddle? Yes or no? [OUTPUT]"
+    GENERATION_PROMPT = "[QUESTION] The answer to the riddle is: [ANSWER]"
+
+    def __init__(self, data, max_len, is_generation, is_exact_match, tokenizer=None):
         self.data = []
         for entry in data:
             question = entry['question']
@@ -34,6 +38,8 @@ class RiddleSenseDataset(Dataset):
             prompt = self.GENERATION_PROMPT
             if self.is_exact_match:
                 prompt = prompt.replace('[ANSWER]', "")
+            else:
+                prompt = prompt.replace('[ANSWER]', entry.answer)
         else:
             prompt = self.DISCRIMINATION_PROMPT
             prompt = prompt.replace('[ANSWER]', entry.answer)
@@ -43,8 +49,11 @@ class RiddleSenseDataset(Dataset):
         # Will only do so when an output is provided.
         self.prompt = prompt.replace('[OUTPUT]', entry.output)
 
-        input_ids = self.tokenizer(self.prompt, return_tensors="pt", truncation=True, padding='max_length',
-                                   max_length=self.max_len).input_ids
+        if self.tokenizer is not None:
+            input_ids = self.tokenizer(self.prompt, return_tensors="pt", truncation=True, padding='max_length',
+                                       max_length=self.max_len).input_ids
+        else:
+            input_ids = None
 
         if entry.output == "":
             return input_ids, entry.answer, entry.is_correct, self.prompt
@@ -62,11 +71,12 @@ class DataEntry:
     'choices':
             'label': ['A', 'B', 'C', 'D', 'E'],
             'text': ['throw', 'bit', 'gallon', 'mouse', 'hole']
+    Both questions and text answers are stripped of all surrounding whitespace.
     """
 
     def __init__(self, question, answer, is_correct, output=""):
-        self.question = question
-        self.answer = answer
+        self.question = question.strip()
+        self.answer = answer.strip()
         self.is_correct = is_correct
         self.output = output
 
@@ -93,35 +103,6 @@ class GenerationDataset(Dataset):
         self.encodings = tokenizer(self.data, return_tensors="pt", truncation=True, padding='max_length',
                                    max_length=self.max_len)
         
-    def __getitem__(self, idx):
-        return {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
-
-    def __len__(self):
-        return len(self.encodings)
-
-
-class DiscriminationDataset(Dataset):
-    def __init__(self, dataset, split, tokenizer, max_len):
-        self.data = []
-        self.labels = []
-
-        for entry in dataset[split]:
-            question = entry['question']
-
-            if split != 'test':
-                for i in range(len(entry['choices']['text'])):
-                    label = entry['choices']['label'][i]
-                    answer = entry['choices']['text'][i]
-
-                    if label == entry['answerKey']:
-                        self.data.append(question + " " + answer)
-            else:
-                self.data.append(question)
-
-        self.max_len = max_len
-        self.encodings = tokenizer(self.data, return_tensors="pt", truncation=True, padding='max_length',
-                                   max_length=self.max_len)
-
     def __getitem__(self, idx):
         return {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
 
