@@ -81,7 +81,7 @@ class DataEntry:
         self.output = output
 
 
-class GenerationDataset(Dataset):
+class FineTuneDataset(Dataset):
     def __init__(self, dataset, split, tokenizer, max_len):
         self.data = []
         self.labels = []

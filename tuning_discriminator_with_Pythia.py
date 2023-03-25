@@ -2,9 +2,8 @@ import torch
 import random
 from datasets import load_dataset
 import os
-from RiddleDataset import GenerationDataset
+from RiddleDataset import FineTuneDataset
 from transformers import AutoTokenizer, GPTNeoXForCausalLM, Trainer, TrainingArguments, DataCollatorForLanguageModeling
-import numpy as np
 import evaluate
 
 
@@ -23,7 +22,6 @@ if __name__ == '__main__':
 
     model_sizes = ["70m", "160m", "410m", "1b", "1.4b", "2.8b", "6.9b", "12b"]
     # 70M, 160M, 410M, 1B, 1.4B, 2.8B, 6.9B, and 12B.
-    results = {"generation": {}, "discrimination": {}}
 
     # Setting the random seed.
     random.seed(RANDOM_SEED)
@@ -56,9 +54,9 @@ if __name__ == '__main__':
     model.to(device)
 
     # Generation == question answering
-    train_set = GenerationDataset(original_dataset, 'train', tokenizer, MAX_SEQUENCE_LENGTH)
-    val_set = GenerationDataset(original_dataset, 'validation', tokenizer, MAX_SEQUENCE_LENGTH)
-    test_set = GenerationDataset(original_dataset, 'test', tokenizer, MAX_SEQUENCE_LENGTH)
+    train_set = FineTuneDataset(original_dataset, 'train', tokenizer, MAX_SEQUENCE_LENGTH)
+    val_set = FineTuneDataset(original_dataset, 'validation', tokenizer, MAX_SEQUENCE_LENGTH)
+    test_set = FineTuneDataset(original_dataset, 'test', tokenizer, MAX_SEQUENCE_LENGTH)
 
     print(len(train_set))
     print(len(val_set))
@@ -111,8 +109,3 @@ if __name__ == '__main__':
 
     out = tokenizer.batch_decode(tokens)
     print(out)
-
-
-
-
-
