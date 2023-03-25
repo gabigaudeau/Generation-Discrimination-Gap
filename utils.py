@@ -1,7 +1,7 @@
 import os
 
 
-def write_to_file(model_name, is_generation, is_exact_match, k, result, batch_size=1):
+def write_result_to_file(model_name, is_generation, is_exact_match, k, result, batch_size=1):
     if is_generation:
         task = "generation"
     else:
